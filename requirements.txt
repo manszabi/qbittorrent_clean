@@ -1,0 +1,6 @@
+# A qBittorrent takaritonak SZANDEKOSAN nincs kulso fuggosege:
+# mindent a Python szabvany konyvtarabol hasznal (urllib, json, ssl, tkinter).
+#
+# Ezert ez a fajl csak megjegyzeseket tartalmaz. Az inditó parancsfajl
+# (qbittorrent_clean.bat) megnezi, van-e itt valodi csomag-sor, es ha igen,
+# telepiti - igy egy kesobbi fuggoseg is magatol felkerul.

@@ -86,6 +86,11 @@ class QbtError(Exception):
     """WebUI vagy fajlrendszer hiba - ilyenkor semmit nem torlunk."""
 
 
+class SafetyStop(QbtError):
+    """Biztonsagi fek: a beallitasokbol az kovetkezne, hogy szinte mindent
+    torolne (nincs torrent, vagy rossz az utvonal-megfeleltetes)."""
+
+
 # ------------------------------------------------------------------ WebUI
 
 class QbtClient:
@@ -498,6 +503,43 @@ def plan_tree(target, roots, dirs, excludes, ignore_case=True, min_age_days=0,
     return out
 
 
+def plan_all(torrents, files_by_hash, targets, mode="felso", maps=(), excludes=(),
+             ignore_case=True, min_age_days=0, extra_protected=(),
+             allow_empty=False, on_note=None):
+    """A teljes terv: mely elemekhez nem tartozik mar torrent.
+
+    A vizsgalt konyvtarak vedik egymast: ha az egyik a masik alkonyvtara (pl.
+    downloads es downloads/rss), akkor a szulo takaritasakor nem esik aldozatul.
+
+    SafetyStop-ot dob, ha a beallitasokbol az kovetkezne, hogy szinte mindent
+    torolne - ilyenkor sokkal valoszinubb, hogy a beallitas rossz, mint hogy
+    tenyleg minden felesleges.
+    """
+    if not torrents and not allow_empty:
+        raise SafetyStop("A qBittorrentben egyetlen torrent sincs, igy MINDENT "
+                         "torolne.")
+    names = owned_names(torrents, ignore_case) if mode == "felso" else set()
+    candidates = []
+    for target in targets:
+        protected = [t for t in targets if t != target] + list(extra_protected)
+        if mode == "felso":
+            candidates += plan_toplevel(target, names, excludes, ignore_case,
+                                        min_age_days, protected)
+        else:
+            roots, dirs = owned_paths(torrents, files_by_hash, maps, target,
+                                      ignore_case)
+            if on_note:
+                on_note(target, len(roots))
+            if not roots and not allow_empty:
+                raise SafetyStop(
+                    "Egyetlen torrent-elem sem esik a(z) %s konyvtarba. "
+                    "Valoszinuleg utvonal-megfeleltetes kell (TAVOLI=HELYI). "
+                    "Igy MINDENT torolne, ezert leallok." % target)
+            candidates += plan_tree(target, roots, dirs, excludes, ignore_case,
+                                    min_age_days, protected)
+    return candidates
+
+
 # ------------------------------------------------------------------ torles
 
 def human(size):
@@ -532,6 +574,15 @@ def remove_file(path):
         os.remove(path)
     except PermissionError:
         force_remove(os.remove, path, None)
+
+
+def owner_target(path, targets):
+    """Melyik vizsgalt konyvtarhoz kepest szamoljuk az elem utvonalat (a
+    kukaban ez alapjan jon letre a konyvtar-szerkezet). Egymasba agyazott
+    konyvtaraknal a legkulsot valasztjuk, igy nem utik egymast az azonos nevu
+    fajlok (pl. rss\\film.mkv es film.mkv)."""
+    owners = sorted(targets, key=lambda t: len(str(t)))
+    return next((t for t in owners if t in Path(path).parents), owners[0])
 
 
 def remove_entry(candidate, target, trash_dir=None):
@@ -722,39 +773,19 @@ def main(argv=None):
     for target in targets:
         print("Vizsgalt konyvtar: %s" % target)
 
-    if not torrents and not args.allow_empty:
-        print()
-        print("A qBittorrentben egyetlen torrent sincs, igy MINDENT torolne. "
-              "Ha tenyleg ezt akarod: --ures-lista-ok", file=sys.stderr)
-        return 2
+    def note(target, count):
+        print("A(z) %s alatt talalt torrent-elemek: %d" % (target, count))
 
-    names = owned_names(torrents, ignore_case) if args.mod == "felso" else set()
-
-    candidates = []
     try:
-        for target in targets:
-            protected = [t for t in targets if t != target]
-            if trash_dir:
-                protected.append(trash_dir)
-            if args.mod == "felso":
-                found = plan_toplevel(target, names, excludes, ignore_case,
-                                      args.min_age, protected)
-            else:
-                roots, dirs = owned_paths(torrents, files_by_hash, maps, target,
-                                          ignore_case)
-                print("A(z) %s alatt talalt torrent-elemek: %d"
-                      % (target, len(roots)))
-                if not roots and not args.allow_empty:
-                    print()
-                    print("Egyetlen torrent-elem sem esik a(z) %s konyvtarba. "
-                          "Valoszinuleg utvonal-megfeleltetes kell (--utvonal "
-                          "TAVOLI=HELYI). Igy MINDENT torolne, ezert leallok. "
-                          "Ha tenyleg ezt akarod: --ures-lista-ok" % target,
-                          file=sys.stderr)
-                    return 2
-                found = plan_tree(target, roots, dirs, excludes, ignore_case,
-                                  args.min_age, protected)
-            candidates.extend(found)
+        candidates = plan_all(
+            torrents, files_by_hash, targets, args.mod, maps, excludes,
+            ignore_case, args.min_age,
+            extra_protected=[trash_dir] if trash_dir else (),
+            allow_empty=args.allow_empty, on_note=note)
+    except SafetyStop as exc:
+        print()
+        print("%s Ha tenyleg ezt akarod: --ures-lista-ok" % exc, file=sys.stderr)
+        return 2
     except QbtError as exc:
         print("Hiba: %s" % exc, file=sys.stderr)
         print("Semmit nem toroltem.", file=sys.stderr)
@@ -795,13 +826,9 @@ def main(argv=None):
     print()
     freed = 0
     failed = 0
-    # Kukazasnal a legkulso vizsgalt konyvtarhoz kepest szamoljuk az utvonalat,
-    # igy az egymasba agyazott konyvtarak szerkezete megmarad a kukaban is
-    # (pl. rss\tavalyi.mkv), es nem utik egymast az azonos nevu fajlok.
-    owners = sorted(targets, key=lambda t: len(str(t)))
     for cand in candidates:
-        owner = next((t for t in owners if t in cand.path.parents), owners[0])
-        ok, message = remove_entry(cand, owner, trash_dir)
+        ok, message = remove_entry(cand, owner_target(cand.path, targets),
+                                   trash_dir)
         if ok:
             freed += cand.size
         else:
