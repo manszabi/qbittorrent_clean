@@ -31,6 +31,7 @@ run() {  # run <nev> <parancs...>
   if out=$("$@" 2>&1); then echo "OK"; else echo "HIBA"; echo "$out" | tail -25; fail=1; fi
 }
 
+run "parancsfajlok (*.bat)"  $PY bat_test.py
 run "motor (qbt_cleanup.py)" $PY qbt_test.py
 run "felulet (qbt_gui.py)"   $GUI gui_test.py
 

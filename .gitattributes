@@ -1,0 +1,8 @@
+# A Windows parancsfajlokat a cmd.exe csak CRLF sorvegekkel eszi meg.
+# A -text miatt a git nem alakitgatja: a tarolt tartalom megy a klonba,
+# a ZIP-be es a nyers (raw) letoltesbe is.
+*.bat -text
+
+*.py text eol=lf
+*.sh text eol=lf
+*.md text

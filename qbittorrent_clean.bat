@@ -40,9 +40,12 @@ for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version.split()[0])" 2^>
 echo [OK]   Python megtalalva: %PY%  (verzio: %PYVER%)
 
 rem --- 2. Verzio ellenorzes (3.7 vagy ujabb kell) ----------------------------
-%PY% -c "import sys;sys.exit(0 if sys.version_info>=(3,7) else 1)" >nul 2>&1
-if errorlevel 1 (
-    echo [HIBA] Tul regi Python verzio: %PYVER%
+rem  Szamot kerunk a Pythontol (pl. 3.12 -^> 312), es azt hasonlitjuk ossze:
+rem  igy nem kerul relacios jel a parancsba, amit a cmd atiranyitasnak nezne.
+set "PYNUM=0"
+for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version_info[0]*100+sys.version_info[1])" 2^>nul') do set "PYNUM=%%v"
+if %PYNUM% LSS 307 (
+    echo [HIBA] Tul regi vagy felismerhetetlen Python verzio: %PYVER%
     echo        Legalabb Python 3.7 szukseges.
     goto :error
 )
@@ -72,11 +75,12 @@ echo [OK]   tkinter megvan.
 
 rem --- 5. Kulso csomagok (requirements.txt) ---------------------------------
 rem  A program szandekosan nem hasznal kulso csomagot, ezert a
-rem  requirements.txt csak megjegyzeseket tartalmaz. Ha egyszer mégis kerul
+rem  requirements.txt csak megjegyzeseket tartalmaz. Ha egyszer megis kerul
 rem  bele valodi sor, ez a resz telepiti.
 if not exist requirements.txt goto :nincs_csomag
-%PY% -c "import sys,pathlib;sorok=[s.strip() for s in pathlib.Path('requirements.txt').read_text(encoding='utf-8').splitlines()];sys.exit(1 if any(s and not s.startswith('#') for s in sorok) else 0)" >nul 2>&1
-if not errorlevel 1 goto :nincs_csomag
+rem  Van-e valodi csomag-sor (nem megjegyzes es nem ures)?
+findstr /r /v /c:"^ *#" /c:"^ *$" requirements.txt >nul 2>&1
+if errorlevel 1 goto :nincs_csomag
 
 echo [..]   Kulso csomagok ellenorzese / telepitese...
 %PY% -m pip install -r requirements.txt >nul 2>&1

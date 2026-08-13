@@ -186,5 +186,6 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 
 | Teszt | Mit vizsgál |
 |-------|-------------|
+| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, meglévő ugrási címkék. (Ezek nélkül a `cmd.exe` menet közben elszáll.) |
 | `qbt_test.py` | A motor: útvonal-kezelés, a két üzemmód, kuka, biztonsági fékek, valódi törlés. 73 ellenőrzés. |
 | `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése. 54 ellenőrzés. Fejnélküli gépen `xvfb-run` kell hozzá. |
