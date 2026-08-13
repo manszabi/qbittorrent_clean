@@ -1,16 +1,16 @@
 @echo off
 setlocal EnableExtensions
-title qBittorrent takarito
+title qBittorrent takarito - parancssor
 
 rem ---------------------------------------------------------------------------
-rem  qBittorrent takarito inditasa Windows alatt.
+rem  A takarito parancssoros inditasa (utemezett futtatashoz vagy ha nem kell
+rem  az ablak). Alapbol csak MEGMUTATJA, mit torolne.
 rem
-rem  Alapbol csak MEGMUTATJA, mit torolne. A tenyleges torleshez ird at lent a
-rem  TOROL sort erre:  set "TOROL=--torol"
+rem  A tenyleges torleshez ird at lent a TOROL sort erre:
+rem      set "TOROL=--torol"
 rem
-rem  Megjegyzes: ez a fajl szandekosan ekezet nelkuli, mert a cmd.exe a
-rem  parancsfajlokat a rendszer kodlapjaval olvassa, es az ekezetes karakterek
-rem  elronthatjak a vegrehajtast.
+rem  Ekezetet szandekosan nem tartalmaz, es nincs benne tobbsoros zarojeles
+rem  blokk sem - lasd a qbittorrent_clean.bat magyarazatat.
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
@@ -20,8 +20,8 @@ set "URL=http://192.168.1.38:30024/"
 set "FELHASZNALO=admin"
 
 rem A vizsgalt konyvtarak. Az egymasba agyazottakat is sorold fel (a downloads
-rem alatti rss mappat kulon), kulonben a szulo takaritasakor felesleges elemnek
-rem latszana!
+rem alatti rss mappat kulon), kulonben a szulo takaritasakor felesleges
+rem elemnek latszana!
 set "KONYVTARAK=--konyvtar \\192.168.1.38\downloads --konyvtar \\192.168.1.38\downloads\rss"
 
 rem Ures = csak proba (nem torol). Torleshez:  set "TOROL=--torol"
@@ -32,42 +32,39 @@ rem set "KUKA=--kuka \\192.168.1.38\downloads\.kuka"
 set "KUKA="
 
 echo ============================================================
-echo   qBittorrent takarito
+echo   qBittorrent takarito - parancssor   [indito v2]
 echo ============================================================
 echo.
 
-rem --- Python kereses ---------------------------------------------------------
 set "PY="
 py -3 -c "import sys" >nul 2>&1 && set "PY=py -3"
-if not defined PY (
-    python -c "import sys" >nul 2>&1 && set "PY=python"
-)
-if not defined PY (
-    echo [HIBA] Nem talalhato Python a rendszeren.
-    echo.
-    echo  Telepitsd a Python 3-at innen: https://www.python.org/downloads/
-    echo  A telepitonel pipald be az "Add python.exe to PATH" opciot.
-    goto :error
-)
+if defined PY goto :python_megvan
+python -c "import sys" >nul 2>&1 && set "PY=python"
+if defined PY goto :python_megvan
+echo [HIBA] Nem talalhato Python a rendszeren.
+echo  Telepitsd innen: https://www.python.org/downloads/
+goto :hiba
 
-%PY% -c "import sys;sys.exit(0 if sys.version_info>=(3,7) else 1)" >nul 2>&1
-if errorlevel 1 (
-    echo [HIBA] Tul regi Python verzio, legalabb 3.7 szukseges.
-    goto :error
-)
-
-rem --- Inditas ----------------------------------------------------------------
+:python_megvan
+if not exist "qbt_cleanup.py" goto :nincs_program
 %PY% qbt_cleanup.py --url "%URL%" --user "%FELHASZNALO%" %KONYVTARAK% %KUKA% %TOROL%
-set "KOD=%ERRORLEVEL%"
-
+if errorlevel 1 goto :hiba
 echo.
-if "%KOD%"=="0" (
-    echo [OK]   Kesz.
-) else (
-    echo [FIGYELEM] A program %KOD% hibakoddal lepett ki - nezd at a fenti sorokat.
-)
-
-:error
+echo [OK]   Kesz.
 echo.
 pause
 endlocal
+exit /b 0
+
+:nincs_program
+echo [HIBA] Nem talalom a qbt_cleanup.py fajlt ebben a mappaban:
+echo        %CD%
+goto :hiba
+
+:hiba
+echo.
+echo [FIGYELEM] Nezd at a fenti sorokat.
+echo.
+pause
+endlocal
+exit /b 1

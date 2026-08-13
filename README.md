@@ -16,7 +16,7 @@ fájlokat és könyvtárakat, **amikhez már nem tartozik torrent**, és törli 
 
 ## Gyors indítás Windows alatt
 
-Kattints duplán a **`qbittorrent_clean.bat`** fájlra. A parancsfájl mindent
+Kattints duplán a **`qbittorrent_clean.bat`** fájlra. Az indítás mindent
 elintéz:
 
 - megkeresi a Pythont (`py` launcher, majd `python`),
@@ -25,6 +25,11 @@ elintéz:
 - ha a `requirements.txt`-ben van külső csomag, **telepíti** (ha a rendszerszintű
   telepítés nem megy, `--user` módban újrapróbálja),
 - majd elindítja a grafikus felületet.
+
+Maga a `.bat` szándékosan csak a Pythont keresi meg, minden ellenőrzés az
+`indit.py`-ban van – így tesztelhető. (A `cmd.exe` nem az: többsoros zárójeles
+blokk és LF sorvég együtt menet közbeni, félrevezető hibákat okoz, ezért a
+parancsfájlban egyik sincs.)
 
 ## A grafikus felület
 
@@ -166,7 +171,8 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 
 | Fájl | Mi ez |
 |------|-------|
-| `qbittorrent_clean.bat` | **Windows-indító**: ellenőrzi a függőségeket, és elindítja a grafikus felületet. Ezt kattintsd. |
+| `qbittorrent_clean.bat` | **Windows-indító**: megkeresi a Pythont, és átadja a vezérlést az `indit.py`-nak. Ezt kattintsd. |
+| `indit.py` | A függőség-ellenőrzés: verzió, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
 | `qbt_gui.py` | A grafikus felület (Tkinter). |
 | `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
@@ -186,6 +192,7 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 
 | Teszt | Mit vizsgál |
 |-------|-------------|
-| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, meglévő ugrási címkék. (Ezek nélkül a `cmd.exe` menet közben elszáll.) |
+| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
+| `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
 | `qbt_test.py` | A motor: útvonal-kezelés, a két üzemmód, kuka, biztonsági fékek, valódi törlés. 73 ellenőrzés. |
 | `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése. 54 ellenőrzés. Fejnélküli gépen `xvfb-run` kell hozzá. |

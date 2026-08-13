@@ -5,123 +5,52 @@ title qBittorrent takarito
 rem ---------------------------------------------------------------------------
 rem  qBittorrent takarito - inditas Windows alatt.
 rem
-rem  Ellenorzi a Pythont es a szukseges modulokat, a hianyzo csomagokat
-rem  telepiti, majd elinditja a grafikus feluletet (qbt_gui.py).
+rem  Ez a fajl szandekosan nagyon egyszeru: megkeresi a Pythont, es atadja a
+rem  vezerlest az indit.py-nak. Minden fuggoseg-ellenorzes ott van, mert azt
+rem  lehet tesztelni - a cmd.exe-t nem.
 rem
-rem  Megjegyzes: ez a fajl szandekosan ekezet nelkuli, mert a cmd.exe a
-rem  parancsfajlokat a rendszer kodlapjaval olvassa, es az ekezetes karakterek
-rem  elronthatjak a vegrehajtast.
+rem  Ezert nincs benne tobbsoros zarojeles blokk sem: ha a fajl valahogy megis
+rem  LF sorveggel keruline a gepre, a cmd akkor sem tud rajta elcsuszni.
+rem
+rem  Ekezetet sem tartalmaz: a cmd a rendszer kodlapjaval olvas.
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
 
 echo ============================================================
-echo   qBittorrent takarito
+echo   qBittorrent takarito   [indito v2]
 echo ============================================================
 echo.
 
-rem --- 1. Python kereses (eloszor a "py" launcher, aztan a "python") ---------
 set "PY="
 py -3 -c "import sys" >nul 2>&1 && set "PY=py -3"
-if not defined PY (
-    python -c "import sys" >nul 2>&1 && set "PY=python"
-)
-if not defined PY (
-    echo [HIBA] Nem talalhato Python a rendszeren.
-    echo.
-    echo  Telepitsd a Python 3-at innen: https://www.python.org/downloads/
-    echo  A telepitonel pipald be az "Add python.exe to PATH" opciot,
-    echo  valamint a "tcl/tk and IDLE" komponenst.
-    goto :error
-)
+if defined PY goto :python_megvan
+python -c "import sys" >nul 2>&1 && set "PY=python"
+if defined PY goto :python_megvan
+goto :nincs_python
 
-set "PYVER=ismeretlen"
-for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version.split()[0])" 2^>nul') do set "PYVER=%%v"
-echo [OK]   Python megtalalva: %PY%  (verzio: %PYVER%)
-
-rem --- 2. Verzio ellenorzes (3.7 vagy ujabb kell) ----------------------------
-rem  Szamot kerunk a Pythontol (pl. 3.12 -^> 312), es azt hasonlitjuk ossze:
-rem  igy nem kerul relacios jel a parancsba, amit a cmd atiranyitasnak nezne.
-set "PYNUM=0"
-for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version_info[0]*100+sys.version_info[1])" 2^>nul') do set "PYNUM=%%v"
-if %PYNUM% LSS 307 (
-    echo [HIBA] Tul regi vagy felismerhetetlen Python verzio: %PYVER%
-    echo        Legalabb Python 3.7 szukseges.
-    goto :error
-)
-
-rem --- 3. A program altal hasznalt modulok ----------------------------------
-rem  Ezek mind a Python resze, kulon telepites nelkul. Ha megis hianyzik
-rem  valamelyik, az szinte biztosan csonka Python telepites.
-%PY% -c "import json,ssl,shutil,urllib.request,http.cookiejar" >nul 2>&1
-if errorlevel 1 (
-    echo [HIBA] Hianyzik a Python egy alap modulja (json / ssl / urllib).
-    echo        Telepitsd ujra a Pythont a hivatalos telepitovel.
-    goto :error
-)
-echo [OK]   Alap modulok megvannak.
-
-rem --- 4. tkinter (a grafikus felulethez kell, pip-pel NEM telepitheto) ------
-%PY% -c "import tkinter" >nul 2>&1
-if errorlevel 1 (
-    echo [HIBA] Hianyzik a tkinter modul - enelkul nincs grafikus felulet.
-    echo.
-    echo  Inditsd el a Python telepitot ujra ("Modify"), es pipald be a
-    echo  "tcl/tk and IDLE" komponenst. Addig is hasznalhato a parancssoros
-    echo  valtozat:  qbt_takaritas.bat
-    goto :error
-)
-echo [OK]   tkinter megvan.
-
-rem --- 5. Kulso csomagok (requirements.txt) ---------------------------------
-rem  A program szandekosan nem hasznal kulso csomagot, ezert a
-rem  requirements.txt csak megjegyzeseket tartalmaz. Ha egyszer megis kerul
-rem  bele valodi sor, ez a resz telepiti.
-if not exist requirements.txt goto :nincs_csomag
-rem  Van-e valodi csomag-sor (nem megjegyzes es nem ures)?
-findstr /r /v /c:"^ *#" /c:"^ *$" requirements.txt >nul 2>&1
-if errorlevel 1 goto :nincs_csomag
-
-echo [..]   Kulso csomagok ellenorzese / telepitese...
-%PY% -m pip install -r requirements.txt >nul 2>&1
-if not errorlevel 1 goto :csomag_kesz
-echo [..]   Ujraprobalom felhasznaloi modban...
-%PY% -m pip install --user -r requirements.txt
-if not errorlevel 1 goto :csomag_kesz
-echo [HIBA] Nem sikerult telepiteni a szukseges csomagokat.
-goto :error
-
-:csomag_kesz
-echo [OK]   Csomagok rendben.
-goto :program_ellenorzes
-
-:nincs_csomag
-echo [OK]   Kulso csomag nem szukseges.
-
-:program_ellenorzes
-
-rem --- 6. A program megletenek ellenorzese ----------------------------------
-if not exist qbt_gui.py (
-    echo [HIBA] Nem talalom a qbt_gui.py fajlt ebben a mappaban:
-    echo        %CD%
-    goto :error
-)
-
-rem --- 7. Inditas -----------------------------------------------------------
-echo.
-echo Indul a grafikus felulet...
-echo.
-%PY% qbt_gui.py
-set "KOD=%ERRORLEVEL%"
-if not "%KOD%"=="0" (
-    echo.
-    echo [FIGYELEM] A program %KOD% hibakoddal lepett ki.
-    goto :error
-)
+:python_megvan
+if not exist "indit.py" goto :nincs_indito
+%PY% indit.py
+if errorlevel 1 goto :hiba
 endlocal
 exit /b 0
 
-:error
+:nincs_python
+echo [HIBA] Nem talalhato Python a rendszeren.
+echo.
+echo  Telepitsd innen: https://www.python.org/downloads/
+echo  A telepitonel pipald be az "Add python.exe to PATH" opciot,
+echo  valamint a "tcl/tk and IDLE" komponenst.
+goto :hiba
+
+:nincs_indito
+echo [HIBA] Nem talalom az indit.py fajlt ebben a mappaban:
+echo        %CD%
+echo  Ugy tunik, hianyos a kicsomagolt mappa.
+goto :hiba
+
+:hiba
 echo.
 pause
 endlocal

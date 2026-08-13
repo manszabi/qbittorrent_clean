@@ -32,6 +32,7 @@ run() {  # run <nev> <parancs...>
 }
 
 run "parancsfajlok (*.bat)"  $PY bat_test.py
+run "indito (indit.py)"      $PY indit_test.py
 run "motor (qbt_cleanup.py)" $PY qbt_test.py
 run "felulet (qbt_gui.py)"   $GUI gui_test.py
 

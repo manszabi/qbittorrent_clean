@@ -41,10 +41,19 @@ for bat in batok:
 
     szoveg = adat.decode("ascii", "replace")
     # A hivatkozott programfajlok tenyleg letezzenek.
-    for nev in ("qbt_gui.py", "qbt_cleanup.py", "requirements.txt"):
+    for nev in ("indit.py", "qbt_gui.py", "qbt_cleanup.py"):
         if nev in szoveg:
             check("%s: hivatkozik ra, es megvan (%s)" % (bat.name, nev),
                   (REPO / nev).is_file(), True)
+    # Tobbsoros zarojeles blokk: pont ezeken csuszik el a cmd, ha a sorveg
+    # valahogy megis LF lenne. Ezert egyetlen sor sem vegzodhet nyito
+    # zarojelre.
+    check("%s: nincs tobbsoros zarojeles blokk" % bat.name,
+          [sor for sor in szoveg.splitlines() if sor.rstrip().endswith("(")], [])
+    # Verziojelzo: a kimenetbol latszik, melyik valtozat futott.
+    check("%s: kiirja az indito verziojat" % bat.name,
+          "[indito v" in szoveg, True)
+
     # Minden goto-nak legyen cimkeje.
     cimkek = {sor.strip().lstrip(":").lower()
               for sor in szoveg.splitlines() if sor.strip().startswith(":")}
