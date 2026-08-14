@@ -17,8 +17,10 @@ import contextlib
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -29,11 +31,40 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import qbt_cleanup as engine
+import qbt_naplo
 
 CIM = "qBittorrent takarító"
 
 # Ennyi ezredmásodpercenként nézi meg az ablak, hogy üzent-e a háttérszál.
 FIGYELES_MP = 100
+
+
+def dpi_tudatossag() -> None:
+    """Windows 11 alatt a Tk alapbol nem DPI-tudatos: 125-150%-os nagyitasnal
+    a rendszer nagyitja fel utolag az ablakot, amitol elmosodott lesz minden
+    betu. Ezzel jelezzuk, hogy magunk kezeljuk a nagyitast.
+
+    A Tk letrehozasa ELOTT kell meghivni."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        # 1 = rendszerszintu DPI-tudatossag (Windows 8.1 ota)
+        ctypes.OleDLL("shcore").SetProcessDpiAwareness(1)
+    except (OSError, AttributeError):  # pragma: no cover - regebbi Windows
+        with contextlib.suppress(OSError, AttributeError):
+            ctypes.windll.user32.SetProcessDPIAware()
+
+
+def dpi_szorzo(root: tk.Misc) -> float:
+    """A kepernyo nagyitasa (1.0 = 100%, 1.5 = 150%). A képpontban megadott
+    meretek ennyivel szorzodnak, hogy nagy felbontason se legyen zsufolt."""
+    if sys.platform != "win32":
+        return 1.0  # mashol a rendszer maga skalaz
+    try:
+        return max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
+    except tk.TclError:  # pragma: no cover
+        return 1.0
 
 
 def beallitas_fajl() -> Path:
@@ -70,13 +101,21 @@ class TakaritoApp:
         # időközbeni átállítás rossz helyre pakolná a fájlokat.
         self.vizsgalt_konyvtarak: list[Path] = []
         self._figyelo: str | None = None
+        self._utolso_jelzes = 0.0
+        self.szorzo = dpi_szorzo(root)
 
         root.title(CIM)
-        root.minsize(880, 620)
+        root.minsize(self.kp(880), self.kp(620))
+        with contextlib.suppress(tk.TclError):  # a betuk is kovessek a nagyitast
+            root.tk.call("tk", "scaling", self.szorzo * 96.0 / 72.0)
         self._epit()
         self.beallitasok_betoltese()
         root.protocol("WM_DELETE_WINDOW", self.kilepes)
         self._figyelo = root.after(FIGYELES_MP, self._sor_figyelese)
+
+    def kp(self, keppont: int) -> int:
+        """Keppontban megadott meret a kepernyo nagyitasahoz igazitva."""
+        return round(keppont * self.szorzo)
 
     # ------------------------------------------------------------ felület
 
@@ -185,11 +224,23 @@ class TakaritoApp:
                                  command=self.kuka_tallozas)
         self.b_kuka.grid(row=5, column=3, sticky="w", pady=(4, 0))
 
+        self.v_naplo_be = tk.BooleanVar(value=True)
+        ttk.Checkbutton(beall, text="Törlési napló:",
+                        variable=self.v_naplo_be).grid(
+            row=6, column=0, sticky="w", pady=(4, 0))
+        self.v_naplo = tk.StringVar(value=str(qbt_naplo.alap_naplo_fajl()))
+        ttk.Entry(beall, textvariable=self.v_naplo, width=40,
+                  state="readonly").grid(
+            row=6, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        ttk.Button(beall, text="Megnyit", width=8,
+                   command=self.naplo_megnyitas).grid(
+            row=6, column=3, sticky="w", pady=(4, 0))
+
         # útvonal-megfeleltetés (csak a "fa" módhoz)
         self.ut_keret = ttk.LabelFrame(
             beall, text="Útvonal-megfeleltetés (qBittorrent útvonala = helyi "
                         "útvonal)", padding=6)
-        self.ut_keret.grid(row=0, column=5, rowspan=6, sticky="nsew", padx=(12, 0))
+        self.ut_keret.grid(row=0, column=5, rowspan=7, sticky="nsew", padx=(12, 0))
         self.ut_keret.columnconfigure(0, weight=1)
         self.lista_ut = tk.Listbox(self.ut_keret, height=5, exportselection=False)
         self.lista_ut.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -224,10 +275,11 @@ class TakaritoApp:
         self.fa.heading("tipus", text="Típus")
         self.fa.heading("meret", text="Méret")
         self.fa.heading("ut", text="Útvonal")
-        self.fa.column("pipa", width=34, anchor="center", stretch=False)
-        self.fa.column("tipus", width=76, anchor="center", stretch=False)
-        self.fa.column("meret", width=90, anchor="e", stretch=False)
-        self.fa.column("ut", width=560, anchor="w")
+        self.fa.column("pipa", width=self.kp(34), anchor="center", stretch=False)
+        self.fa.column("tipus", width=self.kp(76), anchor="center",
+                       stretch=False)
+        self.fa.column("meret", width=self.kp(90), anchor="e", stretch=False)
+        self.fa.column("ut", width=self.kp(560), anchor="w")
         self.fa.grid(row=0, column=0, sticky="nsew")
         fg = ttk.Scrollbar(lista, orient="vertical", command=self.fa.yview)
         fg.grid(row=0, column=1, sticky="ns")
@@ -240,7 +292,8 @@ class TakaritoApp:
         also.columnconfigure(0, weight=1)
         self.v_allapot = tk.StringVar(value="Készen állok.")
         ttk.Label(also, textvariable=self.v_allapot).grid(row=0, column=0, sticky="w")
-        self.halado = ttk.Progressbar(also, mode="indeterminate", length=160)
+        self.halado = ttk.Progressbar(also, mode="indeterminate",
+                                      length=self.kp(160))
         self.halado.grid(row=0, column=1, sticky="e")
 
         self._mod_valtas()
@@ -299,6 +352,20 @@ class TakaritoApp:
         if ut:
             self.v_kuka.set(str(engine.normalize_target(ut)))
 
+    def naplo_megnyitas(self) -> None:
+        """A naplót tartalmazó mappa megnyitása a rendszer fájlkezelőjében."""
+        mappa = Path(self.v_naplo.get()).parent
+        try:
+            mappa.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(mappa)  # csak Windowson létezik
+            else:
+                subprocess.Popen(
+                    ["open" if sys.platform == "darwin" else "xdg-open",
+                     str(mappa)])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror(CIM, f"Nem tudom megnyitni:\n{mappa}\n\n{exc}")
+
     def utvonal_hozzaad(self) -> None:
         tavoli = simpledialog.askstring(
             CIM, "A qBittorrent szerinti útvonal (pl. /downloads):",
@@ -336,6 +403,7 @@ class TakaritoApp:
             "min_kor": self.v_min_kor.get(),
             "kuka_be": self.v_kuka_be.get(),
             "kuka": self.v_kuka.get(),
+            "naplo_be": self.v_naplo_be.get(),
             "utvonalak": list(self.lista_ut.get(0, "end")),
         }
         fajl = beallitas_fajl()
@@ -380,6 +448,7 @@ class TakaritoApp:
         self.v_min_kor.set(str(adat.get("min_kor", "0")))
         self.v_kuka_be.set(bool(adat.get("kuka_be")))
         self.v_kuka.set(str(adat.get("kuka", "")))
+        self.v_naplo_be.set(bool(adat.get("naplo_be", True)))
         self.lista_ut.delete(0, "end")
         for sor in _szoveglista(adat.get("utvonalak")):
             self.lista_ut.insert("end", sor)
@@ -387,6 +456,12 @@ class TakaritoApp:
         self._kuka_valtas()
 
     def kilepes(self) -> None:
+        # Munka kozben a kilepes felbehagyna a torlest (a hattérszal a
+        # folyamatban levo elemmel egyutt all le), ezert rakerdezunk.
+        if self.dolgozik and not messagebox.askyesno(
+                CIM, "Most is dolgozom. Ha kilépsz, a művelet félbemarad.\n\n"
+                     "Biztosan bezárod?", icon="warning", default="no"):
+            return
         self.beallitasok_mentese(csendben=True)
         # A figyelő időzítőt le kell mondani: a destroy() után elsülve már
         # nem létező ablakhoz nyúlna (TclError).
@@ -463,6 +538,7 @@ class TakaritoApp:
             "kivetelek": kivetelek + list(engine.DEFAULT_EXCLUDES),
             "min_kor": min_kor,
             "kuka": kuka,
+            "naplo": Path(self.v_naplo.get()) if self.v_naplo_be.get() else None,
         }
 
     def _munka_indul(self, szoveg: str) -> None:
@@ -478,6 +554,15 @@ class TakaritoApp:
         self.b_proba.configure(state="normal")
         self.b_torles.configure(
             state="normal" if self.pipaltak else "disabled")
+
+    def _jelez(self, szoveg: str, azonnal: bool = False) -> None:
+        """Állapotüzenet a háttérszálból. Másodpercenként legfeljebb tízszer
+        engedjük tovább: e nélkül egy tízezer elemű törlés több tízezer
+        üzenettel árasztaná el az ablakot, és pont attól akadna meg."""
+        most = time.monotonic()
+        if azonnal or most - self._utolso_jelzes >= 0.1:
+            self._utolso_jelzes = most
+            self.uzenetek.put(("allapot", szoveg))
 
     def _hatterben(self, munka: Callable[[], tuple[Any, ...]]) -> None:
         """Elindít egy háttérszálat. Bármi is történik odabent, az eredmény (vagy
@@ -526,22 +611,27 @@ class TakaritoApp:
 
     def _vizsgalat_szal(self, beall: dict[str, Any]) -> tuple[Any, ...]:
         """Külön szálon: WebUI lekérdezés + a könyvtárak átnézése. Tkinterhez
-        nem nyúlhat, csak az eredményt adja vissza."""
+        nem nyúlhat, csak üzen a sorba, illetve az eredményt adja vissza."""
         kliens = engine.QbtClient(beall["url"], beall["user"], beall["jelszo"])
         kliens.login()
         torrentek = kliens.torrents()
         fajlok: dict[str, list[dict[str, Any]]] = {}
         if beall["mod"] == "fa" and beall["pontos"]:
-            for torrent in torrentek:
+            for sorszam, torrent in enumerate(torrentek, 1):
                 azon = torrent.get("hash") or ""
                 if azon:
                     fajlok[azon] = kliens.files(azon)
+                self._jelez(f"Torrentek fájllistája: {sorszam}/{len(torrentek)}…")
+        gondok: list[str] = []
+        self._jelez("A könyvtárak átnézése…")
         elemek = engine.plan_all(
             torrentek, fajlok, beall["konyvtarak"],
             mode=beall["mod"], maps=beall["utvonalak"],
             excludes=beall["kivetelek"], min_age_days=beall["min_kor"],
-            extra_protected=[beall["kuka"]] if beall["kuka"] else ())
-        return ("vizsgalat", len(torrentek), elemek)
+            extra_protected=[beall["kuka"]] if beall["kuka"] else (),
+            on_note=lambda cel, db: self._jelez(f"{cel}: {db} torrent-elem…"),
+            on_warn=gondok.append)
+        return ("vizsgalat", len(torrentek), elemek, gondok)
 
     def _elemek_kiirasa(self, elemek: Sequence[engine.Candidate],
                         pipalva: bool = True) -> None:
@@ -616,7 +706,7 @@ class TakaritoApp:
         konyvtarak = self.vizsgalt_konyvtarak or beall["konyvtarak"]
         self._munka_indul("Törlés…")
         self._hatterben(lambda: self._torles_szal(
-            indexek, valasztott, konyvtarak, beall["kuka"]))
+            indexek, valasztott, konyvtarak, beall["kuka"], beall["naplo"]))
 
     def _torles_szal(
         self,
@@ -624,18 +714,29 @@ class TakaritoApp:
         elemek: Sequence[engine.Candidate],
         konyvtarak: Sequence[Path],
         kuka: Path | None,
+        naplo_ut: Path | None = None,
     ) -> tuple[Any, ...]:
         kesz: set[int] = set()
         hibak: list[tuple[engine.Candidate, str]] = []
         felszabadult = 0
-        for index, elem in zip(indexek, elemek, strict=True):
-            gazda = engine.owner_target(elem.path, konyvtarak)
-            siker, uzenet = engine.remove_entry(elem, gazda, kuka)
-            if siker:
-                kesz.add(index)
-                felszabadult += elem.size
-            else:
-                hibak.append((elem, uzenet))
+        osszes = len(elemek)
+        naplo = qbt_naplo.nyitas(naplo_ut) if naplo_ut else None
+        try:
+            for sorszam, (index, elem) in enumerate(
+                    zip(indexek, elemek, strict=True), 1):
+                gazda = engine.owner_target(elem.path, konyvtarak)
+                siker, uzenet = engine.remove_entry(elem, gazda, kuka)
+                if siker:
+                    kesz.add(index)
+                    felszabadult += elem.size
+                else:
+                    hibak.append((elem, uzenet))
+                if naplo:
+                    naplo.rogzit(elem, siker, uzenet, kukaba=bool(kuka))
+                self._jelez(f"Törlés: {sorszam}/{osszes} – {elem.path.name}")
+        finally:
+            if naplo:
+                naplo.close()
         return ("torles", kesz, hibak, felszabadult)
 
     # ----------------------------------------------------- üzenetek kezelése
@@ -650,12 +751,15 @@ class TakaritoApp:
 
     def _uzenet(self, uzenet: tuple[Any, ...]) -> None:
         fajta = uzenet[0]
-        if fajta == "kapcsolat":
+        if fajta == "allapot":
+            if self.dolgozik:  # egy kesve erkezo jelzes ne irja felul a vegso
+                self.allapot(uzenet[1])
+        elif fajta == "kapcsolat":
             _, verzio, darab = uzenet
             self._munka_vege()
             self.allapot(f"Kapcsolódva: qBittorrent {verzio}, {darab} torrent.")
         elif fajta == "vizsgalat":
-            _, torrentek, elemek = uzenet
+            _, torrentek, elemek, gondok = uzenet
             self._elemek_kiirasa(elemek)
             self._munka_vege()
             if not elemek:
@@ -663,6 +767,13 @@ class TakaritoApp:
                              "nincs mit tenni.")
             else:
                 self._osszegzes()
+            if gondok:
+                reszletek = "\n".join(gondok[:10])
+                tobbi = (f"\n… és még {len(gondok) - 10}."
+                         if len(gondok) > 10 else "")
+                messagebox.showwarning(
+                    CIM, f"{len(gondok)} könyvtárat nem tudtam beolvasni, "
+                         f"ezekben nem takarítottam:\n\n{reszletek}{tobbi}")
         elif fajta == "torles":
             _, kesz, hibak, felszabadult = uzenet
             maradek = [c for i, c in enumerate(self.elemek) if i not in kesz]
@@ -689,6 +800,7 @@ def main() -> int:
         print(f"Tul regi Python: {sys.version.split()[0]} (legalabb {kell} kell).",
               file=sys.stderr)
         return 2
+    dpi_tudatossag()
     root = tk.Tk()
     try:
         TakaritoApp(root)

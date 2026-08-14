@@ -26,7 +26,7 @@ echo "python: $($PY -V 2>&1)  ($PY)"
 
 fail=0
 run() {  # run <nev> <parancs...>
-  printf '%-28s' "$1"
+  printf '%-30s' "$1"
   shift
   if out=$("$@" 2>&1); then echo "OK"; else echo "HIBA"; echo "$out" | tail -25; fail=1; fi
 }
@@ -34,6 +34,7 @@ run() {  # run <nev> <parancs...>
 run "parancsfajlok (*.bat)"  $PY bat_test.py
 run "indito (indit.py)"      $PY indit_test.py
 run "motor (qbt_cleanup.py)" $PY qbt_test.py
+run "torlesi naplo (qbt_naplo.py)" $PY naplo_test.py
 run "felulet (qbt_gui.py)"   $GUI gui_test.py
 
 echo

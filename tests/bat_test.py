@@ -11,6 +11,7 @@ eszrevetlenul keletkeznek:
   * hianyzo .gitattributes szabaly: e nelkul a git a klonozasnal / ZIP-ben
     visszaalakitana a sorvegeket.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +63,24 @@ for bat in batok:
                and not sor.strip().lower().startswith("rem")}
     check(f"{bat.name}: minden ugrasnak van cimkeje",
           sorted(ugrasok - cimkek), [])
+
+    # Elgepelt valtozonev: a cmd a parancsfajlban NEM ures szoveggel
+    # helyettesiti az ismeretlen %VALAMI%-t, hanem valtozatlanul hagyja - igy a
+    # "%HATAR%" szoveg jutna el a programig argumentumkent. Ezert minden
+    # hivatkozott valtozot vagy a fajl allit be, vagy a Windows adja.
+    WINDOWSTOL = {"cd", "appdata", "localappdata", "userprofile", "path",
+                  "temp", "tmp", "errorlevel", "username", "computername"}
+    beallitott = {m.lower() for m in re.findall(
+        r'(?im)^\s*set\s+"?([A-Za-z_][A-Za-z0-9_]*)=', szoveg)}
+    # A %% a cmd-ben egyetlen szazalekjelet jelent, azt nem hivatkozasnak
+    # szanjuk; a %~dp0 es a %0..%9 pedig a parancsfajl sajat adata.
+    hivatkozott = {m.lower() for m in re.findall(
+        r'(?<!%)%([A-Za-z_][A-Za-z0-9_]*)%', szoveg.replace("%%", ""))}
+    check(f"{bat.name}: minden hasznalt valtozo letezik",
+          sorted(hivatkozott - beallitott - WINDOWSTOL), [])
+    # Forditva is: amit beallitunk, azt hasznaljuk is (elfelejtett kapcsolo).
+    check(f"{bat.name}: minden beallitott valtozot hasznal is",
+          sorted(beallitott - hivatkozott - {"py"}), [])
 
 attrib = REPO / ".gitattributes"
 check("van .gitattributes", attrib.is_file(), True)

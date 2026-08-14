@@ -131,6 +131,9 @@ win_torrent = [{"hash": "w", "name": "Film", "save_path": "D:\\letoltes",
 win_roots, _ = q.owned_paths(win_torrent, {}, [], "D:\\letoltes")
 check("owned_paths: Windows-utvonal megfeleltetes nelkul is egyezik",
       sorted(win_roots), ["d:/letoltes/film"])
+check("kesz_kulcs: a .!qB vegzodest levagja",
+      q.kesz_kulcs(q.norm_key("Film.mkv" + q.INCOMPLETE_SUFFIX)), "film.mkv")
+check("kesz_kulcs: mast nem bant", q.kesz_kulcs(q.norm_key("Film.mkv")), "film.mkv")
 
 # --------------------------------------------------------- WebUI kliens
 
@@ -209,6 +212,31 @@ check("pontos mod: az idegen fajl is felesleges", names_of(cands, share),
 roots, dirs = q.owned_paths(TORRENTS, {}, [("/valami/mas", str(share))], share)
 check("rossz megfeleltetes -> ures halmaz", len(roots), 0)
 
+# --- felkesz (.!qB) fajlok: a qBittorrent ezt biggyeszti a vegere
+felkesz = share / "Sorozat S01" / ("e03.mkv" + q.INCOMPLETE_SUFFIX)
+felkesz.write_bytes(b"k" * 16)
+felkesz_gyoker = share / ("Uj.Film.2025" + q.INCOMPLETE_SUFFIX)
+felkesz_gyoker.write_bytes(b"u" * 16)
+felkesz_tor = [*TORRENTS, {"hash": "ddd", "name": "Uj.Film.2025",
+                           "save_path": "/downloads", "download_path": "",
+                           "content_path": "/downloads/Uj.Film.2025"}]
+
+nevek_felkesz = q.owned_names(felkesz_tor)
+cands = q.plan_toplevel(share, nevek_felkesz, q.DEFAULT_EXCLUDES, protected=[rss])
+check("felso mod: a felkesz (.!qB) gyokeret megtartja",
+      any(Path(c.path).name == felkesz_gyoker.name for c in cands), False)
+
+felkesz_maps = [("/downloads", str(share)), ("/downloads/rss", str(rss))]
+felkesz_fajlok = {**FILES, "bbb": [{"name": "Sorozat S01/e01.mkv"},
+                                   {"name": "Sorozat S01/e02.mkv"},
+                                   {"name": "Sorozat S01/e03.mkv"}]}
+r_f, d_f = q.owned_paths(felkesz_tor, felkesz_fajlok, felkesz_maps, share)
+cands = q.plan_tree(share, r_f, d_f, q.DEFAULT_EXCLUDES, protected=[rss])
+check("fa+pontos mod: a felkesz fajlt is megtartja",
+      any(q.INCOMPLETE_SUFFIX in str(c.path) for c in cands), False)
+felkesz.unlink()
+felkesz_gyoker.unlink()
+
 # --- min-kor: a frissen modositott elemet meghagyja
 cands = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES, min_age_days=1,
                         protected=[rss])
@@ -248,6 +276,50 @@ except RecursionError:
 finally:
     sys.setrecursionlimit(regi_korlat)
 shutil.rmtree(str(melyfa))
+
+# --- olvashatatlan alkonyvtar: azt az agat kihagyja, de nem all le
+#
+# A tesztet rootkent futtatva a jogosultsag nem korlatoz, ezert magat az
+# os.scandir hivast csereljuk le arra a konyvtarra.
+melyebb = share / "Film.Egy.2024"
+tiltott_kulcs = q.path_key(melyebb)
+eredeti_scandir = os.scandir
+
+
+def tiltakozo_scandir(ut):
+    if q.path_key(str(ut)) == tiltott_kulcs:
+        raise PermissionError(13, "Hozzaferes megtagadva")
+    return eredeti_scandir(ut)
+
+
+share_maps2 = [("/downloads", str(share)), ("/downloads/rss", str(rss))]
+roots2, dirs2 = q.owned_paths(TORRENTS, FILES, share_maps2, share)
+os.scandir = tiltakozo_scandir
+try:
+    gondok = []
+    cands = q.plan_tree(share, roots2, dirs2, q.DEFAULT_EXCLUDES,
+                        protected=[rss], on_warn=gondok.append)
+    check("olvashatatlan alkonyvtar: a tobbi resz elkeszul",
+          names_of(cands, share), ["Regi.Film.2011", "arvalt.mkv"])
+    check("es szol rola", len(gondok), 1)
+    check_true("a hibauzenetben ott a konyvtar",
+               gondok and "Film.Egy.2024" in gondok[0], gondok)
+    check_true("a tiltott konyvtar tartalma nem lett torlesre jelolve",
+               all("Film.Egy.2024" not in str(c.path) for c in cands))
+finally:
+    os.scandir = eredeti_scandir
+
+# magat a vizsgalt konyvtarat viszont tudnunk kell olvasni
+tiltott_kulcs = q.path_key(share)
+os.scandir = tiltakozo_scandir
+try:
+    q.plan_tree(share, roots2, dirs2, q.DEFAULT_EXCLUDES)
+    check("a vizsgalt konyvtar olvasasi hibaja megallit", "nem dobott hibat",
+          "QbtError")
+except q.QbtError:
+    check("a vizsgalt konyvtar olvasasi hibaja megallit", "QbtError", "QbtError")
+finally:
+    os.scandir = eredeti_scandir
 
 # --- force_remove: a konyvtarbol nem veheti el a belepesi (x) jogot, kulonben
 #     a masodik torlesi probalkozas is elszallna
@@ -402,6 +474,35 @@ check("main: fa+pontos mod az idegen fajlt is torolte",
 check("main: fa+pontos mod a torrent fajljait meghagyta",
       (share / "Film.Egy.2024" / "film.mkv").exists()
       and (share / "Film.Egy.2024" / "film.srt").exists(), True)
+
+# torlesi naplo: a valodi torlesrol keszuljon bejegyzes
+naplo_fajl = tmp / "naplo" / "torlesek.log"
+(share / "naplozando.mkv").write_bytes(b"n" * 24)
+code, out = run_main(base + ["--torol", "--igen", "--kivetel", ".kuka",
+                             "--naplo", str(naplo_fajl)])
+naplo_sorok = naplo_fajl.read_text(encoding="utf-8").splitlines()
+check("main: a naplo elkeszult", naplo_fajl.is_file(), True)
+check_true("main: kiirja a naplo helyet", str(naplo_fajl) in out, out)
+naplozott = [s.split("\t") for s in naplo_sorok[1:]]
+check("main: a torolt fajl bekerult a naploba",
+      [(m[1], m[5]) for m in naplozott], [("torolve", "naplozando.mkv")])
+check("main: a konyvtar oszlop a fajl helye", naplozott[0][4], str(share))
+check("main: a meret is megvan", naplozott[0][3], "24")
+
+# --nincs-naplo eseten ne keszuljon semmi
+(share / "naplo.nelkul.mkv").write_bytes(b"n" * 8)
+elozo_meret = naplo_fajl.stat().st_size
+code, out = run_main(base + ["--torol", "--igen", "--kivetel", ".kuka",
+                             "--naplo", str(naplo_fajl), "--nincs-naplo"])
+check("main: --nincs-naplo eseten nem ir a naploba",
+      naplo_fajl.stat().st_size, elozo_meret)
+check("main: de a torles megtortent", (share / "naplo.nelkul.mkv").exists(),
+      False)
+
+# proba futas (nem torol) ne hozzon letre naplot
+proba_naplo = tmp / "proba-naplo" / "torlesek.log"
+run_main(base + ["--kivetel", ".kuka", "--naplo", str(proba_naplo)])
+check("main: a proba futas nem nyit naplot", proba_naplo.exists(), False)
 
 # irasvedett fajl (Samban eloszeretettel fordul elo) + ugyanaz a konyvtar
 # ketszer megadva

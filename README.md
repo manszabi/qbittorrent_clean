@@ -12,7 +12,8 @@ fájlokat és könyvtárakat, **amikhez már nem tartozik torrent**, és törli 
 - **alapból semmit nem töröl**, csak kiírja, mit törölne,
 - a tényleges törléshez `--torol` kell, és megerősítést kér (`--igen` kihagyja),
 - törlés helyett tud **kukába** is mozgatni (`--kuka`),
-- ha nem éri el a WebUI-t, vagy rossz a jelszó, **egyetlen fájlhoz sem nyúl**.
+- ha nem éri el a WebUI-t, vagy rossz a jelszó, **egyetlen fájlhoz sem nyúl**,
+- minden törlésről **naplót** vezet (mit, mikor, honnan).
 
 ## Gyors indítás Windows alatt
 
@@ -129,6 +130,10 @@ nem bánt.
 | `--nincs-gyari-kivetel` | A gyári védett lista kikapcsolása (lásd lent). |
 | `--min-kor NAP` | Csak az ennél régebben módosított elemeket törli. Hasznos, ha épp most raktál oda valamit. |
 | `--kuka KONYVTAR` | Törlés helyett ide mozgat. A kuka önmagát nem eszi meg. |
+| `--naplo FAJL` | A törlési napló helye (alap: lásd lent). |
+| `--nincs-naplo` | Ne vezessen törlési naplót. |
+| `--naplo-meret MB` | Ekkora naplófájl után kezdjen újat (alap: 5 MB). |
+| `--naplo-tartas DB` | Ennyi lezárt (tömörített) naplófájlt tartson meg (alap: 12). |
 | `--max-torles DB` | Ha ennél többet törölne, inkább leáll. |
 | `--torol` | Tényleges törlés (enélkül csak lista). |
 | `--igen` | Ne kérdezzen rá. Ütemezett futtatáshoz kell. |
@@ -141,11 +146,41 @@ Gyárilag védett nevek (a NAS és az operációs rendszer mappái):
 `.recycle`, `#recycle`, `@Recycle`, `@eaDir`, `.@__thumb`, `lost+found`,
 `.Trash-*`, `$RECYCLE.BIN`, `System Volume Information`, `.unwanted`.
 
+## Törlési napló
+
+Minden törölt (vagy kukába mozgatott) elemről bejegyzés készül. A napló helye
+alapból:
+
+| | |
+|---|---|
+| Windows | `%APPDATA%\qbittorrent_clean\naplo\torlesek.log` |
+| Linux / macOS | `~/.local/state/qbittorrent_clean/naplo/torlesek.log` |
+
+A sorok tabulatorral vannak elválasztva, így szövegszerkesztőben olvasható,
+táblázatkezelőben pedig egyből oszlopokra bomlik:
+
+```
+ido                  muvelet   tipus     meret_bajt  konyvtar                    nev                reszletek
+2026-08-14 17:23:45  torolve   konyvtar  4294967296  \\192.168.1.38\downloads    Regi.Film.2011
+2026-08-14 17:23:47  kukaba    fajl      104857600   \\192.168.1.38\downloads    arva.mkv           kukaba: …\.kuka\arva.mkv
+2026-08-14 17:23:48  sikertelen fajl     512         \\192.168.1.38\downloads    zart.mkv           SIKERTELEN: [WinError 32] …
+```
+
+A napló **magától rotálódik**: új fájlt kezd hétfőnként, illetve ha a mostani
+elérte az 5 MB-ot (`--naplo-meret`). A lezárt fájlt gzip-pel tömöríti
+(`torlesek-2026-08-14_172345_871204.log.gz`), és a 12 legfrissebbnél
+régebbieket eldobja (`--naplo-tartas`).
+
+A felületen a *Beállítások* alatt ki-be kapcsolható, és a **Megnyit** gombbal
+a napló mappája megnyitható. A próba (nem törlő) futás nem ír a naplóba, és a
+naplózás soha nem állítja meg a takarítást: ha nem írható a fájl, csak szól
+róla.
+
 ## Amire figyel
 
 - A **félkész** letöltéseket megtartja: a `.!qB` végződésű fájlokat és a
   torrent ideiglenes (`download_path`) könyvtárát is a torrenthez tartozónak
-  veszi.
+  veszi – mindkét üzemmódban.
 - Az **ékezetes neveket** egységesíti (a Samba és a macOS másképp kódolhatja
   ugyanazt a nevet), és alapból a kis/nagybetűt sem nézi.
 - A **kétféle perjelet** (`\` és `/`) ugyanannak veszi, így a `fa` mód akkor is
@@ -155,6 +190,12 @@ Gyárilag védett nevek (a NAS és az operációs rendszer mappái):
   **nem töröl semmit**.
 - A gyökérkönyvtárat (`/`, `C:\`) nem hajlandó takarítani; a megosztás gyökere
   (`\\gép\megosztás`) viszont rendben van.
+- A **260 karakternél hosszabb** útvonalakat is kezeli Windowson (a hosszú
+  kiadási nevek egy `Subs` almappával könnyen átlépik ezt a határt).
+- Ha egy **alkönyvtárat nem tud beolvasni** (jogosultság, hálózati akadás),
+  azt az ágat kihagyja és szól róla – a takarítás többi része lefut.
+- A grafikus felület **DPI-tudatos**: Windows 11 alatt 125–150%-os nagyítás
+  mellett sem lesz elmosódott.
 
 ## Ütemezett futtatás
 
@@ -179,7 +220,8 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | `qbittorrent_clean.bat` | **Windows-indító**: megkeresi a Pythont, és átadja a vezérlést az `indit.py`-nak. Ezt kattintsd. |
 | `indit.py` | A függőség-ellenőrzés: verzió, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
 | `qbt_gui.py` | A grafikus felület (Tkinter). |
-| `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható. |
+| `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható (a `qbt_naplo.py` legyen mellette). |
+| `qbt_naplo.py` | A törlési napló: sorok írása, heti / méret szerinti rotálás, tömörítés. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
 | `pyproject.toml` | A fejlesztői eszközök (ruff) beállítása; a program telepítés nélkül fut. |
@@ -203,7 +245,8 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 
 | Teszt | Mit vizsgál |
 |-------|-------------|
-| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
+| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, minden `%VÁLTOZÓ%` létezik, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
-| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés. |
+| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
+| `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
 | `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése és elrontott beállítás-fájl, háttérszálban keletkező hiba. Fejnélküli gépen `xvfb-run` kell hozzá. |

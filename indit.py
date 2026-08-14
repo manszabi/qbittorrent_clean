@@ -22,7 +22,7 @@ MIN_VERZIO = (3, 10)
 
 # A program ezeket hasznalja a Python szabvany konyvtarabol.
 ALAP_MODULOK = ["json", "ssl", "shutil", "urllib.request", "http.cookiejar",
-                "unicodedata", "dataclasses", "argparse"]
+                "unicodedata", "dataclasses", "argparse", "logging", "gzip"]
 
 ITT = os.path.dirname(os.path.abspath(__file__))
 
@@ -124,7 +124,7 @@ def ellenorzes():
     if not csomagok_telepitese(os.path.join(ITT, "requirements.txt")):
         return False
 
-    for fajl in ("qbt_gui.py", "qbt_cleanup.py"):
+    for fajl in ("qbt_gui.py", "qbt_cleanup.py", "qbt_naplo.py"):
         if not os.path.isfile(os.path.join(ITT, fajl)):
             print("[HIBA] Nem talalom a(z) %s fajlt itt: %s" % (fajl, ITT))
             print("       Ugy tunik, hianyos a kicsomagolt mappa.")
