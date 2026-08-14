@@ -9,6 +9,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import io
+import shutil
 import tempfile
 
 import indit
@@ -19,10 +20,10 @@ fail = 0
 def check(name, got, want):
     global fail
     if got == want:
-        print("ok    %-46s %r" % (name, got))
+        print(f"ok    {name:<46} {got!r}")
     else:
         fail = 1
-        print("HIBA  %-46s kapott=%r  vart=%r" % (name, got, want))
+        print(f"HIBA  {name:<46} kapott={got!r}  vart={want!r}")
 
 
 def csendben(fuggveny, *args, **kw):
@@ -119,7 +120,6 @@ indit.ITT = regi_itt
 eredmeny, kiirt = csendben(indit.main, indit=False)
 check("main indites nelkul: rendben", eredmeny, 0)
 
-import shutil
 shutil.rmtree(str(tmp), ignore_errors=True)
 
 print()

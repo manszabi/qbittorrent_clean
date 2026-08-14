@@ -22,10 +22,10 @@ fail = 0
 def check(name, got, want):
     global fail
     if got == want:
-        print("ok    %-46s %r" % (name, got))
+        print(f"ok    {name:<46} {got!r}")
     else:
         fail = 1
-        print("HIBA  %-46s kapott=%r  vart=%r" % (name, got, want))
+        print(f"HIBA  {name:<46} kapott={got!r}  vart={want!r}")
 
 
 batok = sorted(REPO.glob("*.bat"))
@@ -34,24 +34,24 @@ check("van parancsfajl", bool(batok), True)
 for bat in batok:
     adat = bat.read_bytes()
     maganyos_lf = adat.count(b"\n") - adat.count(b"\r\n")
-    check("%s: minden sorveg CRLF" % bat.name, maganyos_lf, 0)
-    check("%s: nincs ekezetes karakter" % bat.name,
+    check(f"{bat.name}: minden sorveg CRLF", maganyos_lf, 0)
+    check(f"{bat.name}: nincs ekezetes karakter",
           [b for b in adat if b > 127], [])
-    check("%s: nincs BOM" % bat.name, adat[:3] == b"\xef\xbb\xbf", False)
+    check(f"{bat.name}: nincs BOM", adat[:3] == b"\xef\xbb\xbf", False)
 
     szoveg = adat.decode("ascii", "replace")
     # A hivatkozott programfajlok tenyleg letezzenek.
     for nev in ("indit.py", "qbt_gui.py", "qbt_cleanup.py"):
         if nev in szoveg:
-            check("%s: hivatkozik ra, es megvan (%s)" % (bat.name, nev),
+            check(f"{bat.name}: hivatkozik ra, es megvan ({nev})",
                   (REPO / nev).is_file(), True)
     # Tobbsoros zarojeles blokk: pont ezeken csuszik el a cmd, ha a sorveg
     # valahogy megis LF lenne. Ezert egyetlen sor sem vegzodhet nyito
     # zarojelre.
-    check("%s: nincs tobbsoros zarojeles blokk" % bat.name,
+    check(f"{bat.name}: nincs tobbsoros zarojeles blokk",
           [sor for sor in szoveg.splitlines() if sor.rstrip().endswith("(")], [])
     # Verziojelzo: a kimenetbol latszik, melyik valtozat futott.
-    check("%s: kiirja az indito verziojat" % bat.name,
+    check(f"{bat.name}: kiirja az indito verziojat",
           "[indito v" in szoveg, True)
 
     # Minden goto-nak legyen cimkeje.
@@ -60,7 +60,7 @@ for bat in batok:
     ugrasok = {sor.split("goto", 1)[1].strip().lstrip(":").lower()
                for sor in szoveg.splitlines() if "goto" in sor.lower()
                and not sor.strip().lower().startswith("rem")}
-    check("%s: minden ugrasnak van cimkeje" % bat.name,
+    check(f"{bat.name}: minden ugrasnak van cimkeje",
           sorted(ugrasok - cimkek), [])
 
 attrib = REPO / ".gitattributes"

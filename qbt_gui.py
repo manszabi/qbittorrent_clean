@@ -11,24 +11,32 @@ Máshol:
     python3 qbt_gui.py
 """
 
+from __future__ import annotations
+
+import contextlib
 import json
 import os
 import queue
 import sys
 import threading
 import tkinter as tk
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import Any
 
 # A motor a program mellett van, akkor is, ha máshonnan indítják.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import qbt_cleanup as engine  # noqa: E402
+import qbt_cleanup as engine
 
 CIM = "qBittorrent takarító"
 
+# Ennyi ezredmásodpercenként nézi meg az ablak, hogy üzent-e a háttérszál.
+FIGYELES_MP = 100
 
-def beallitas_fajl():
+
+def beallitas_fajl() -> Path:
     """A beállítások helye: Windowson az AppData, máshol a home könyvtár."""
     appdata = os.environ.get("APPDATA")
     if appdata:
@@ -36,29 +44,43 @@ def beallitas_fajl():
     return Path.home() / ".qbittorrent_clean.json"
 
 
+def _szoveglista(adat: Any) -> list[str]:
+    """A beállítás-fájlból jövő listák megszűrése. Kézzel is átírható fájl,
+    ezért nem bízunk a szerkezetében: egy sima szövegen például végig lehetne
+    iterálni betűnként."""
+    if not isinstance(adat, list):
+        return []
+    return [x for x in adat if isinstance(x, str)]
+
+
 class TakaritoApp:
     """A teljes kezelőfelület. A hálózati és fájlrendszeri munka külön szálon
     fut, hogy az ablak ne fagyjon le; az eredmény egy sorba (queue) kerül, amit
     az ablak 100 ezredmásodpercenként néz meg."""
 
-    def __init__(self, root):
+    def __init__(self, root: tk.Misc) -> None:
         self.root = root
-        self.uzenetek = queue.Queue()
-        self.elemek = []          # engine.Candidate lista
-        self.pipaltak = set()     # a bepipált elemek indexei
-        self.sor_index = {}       # Treeview sor -> index
+        self.uzenetek: queue.Queue[tuple[Any, ...]] = queue.Queue()
+        self.elemek: list[engine.Candidate] = []   # engine.Candidate lista
+        self.pipaltak: set[int] = set()            # a bepipált elemek indexei
+        self.sor_index: dict[str, int] = {}        # Treeview sor -> index
         self.dolgozik = False
+        # A vizsgálatkor érvényes könyvtárlista. A törlésnél ehhez mérjük az
+        # elemeket (a kukában ez adja a könyvtár-szerkezetet), különben egy
+        # időközbeni átállítás rossz helyre pakolná a fájlokat.
+        self.vizsgalt_konyvtarak: list[Path] = []
+        self._figyelo: str | None = None
 
         root.title(CIM)
         root.minsize(880, 620)
         self._epit()
         self.beallitasok_betoltese()
         root.protocol("WM_DELETE_WINDOW", self.kilepes)
-        root.after(100, self._sor_figyelese)
+        self._figyelo = root.after(FIGYELES_MP, self._sor_figyelese)
 
     # ------------------------------------------------------------ felület
 
-    def _epit(self):
+    def _epit(self) -> None:
         fo = ttk.Frame(self.root, padding=8)
         fo.pack(fill="both", expand=True)
         fo.columnconfigure(0, weight=1)
@@ -224,7 +246,7 @@ class TakaritoApp:
         self._mod_valtas()
         self._kuka_valtas()
 
-    def _mod_valtas(self):
+    def _mod_valtas(self) -> None:
         fa_mod = self.v_mod.get() == "fa"
         self.cb_pontos.configure(state="normal" if fa_mod else "disabled")
         # Csak a gombokat tiltjuk: a letiltott Listboxba a Tk nem enged beleirni
@@ -233,51 +255,51 @@ class TakaritoApp:
             if isinstance(gyerek, ttk.Button):
                 gyerek.configure(state="normal" if fa_mod else "disabled")
 
-    def _kuka_valtas(self):
+    def _kuka_valtas(self) -> None:
         allapot = "normal" if self.v_kuka_be.get() else "disabled"
         self.e_kuka.configure(state=allapot)
         self.b_kuka.configure(state=allapot)
 
-    def allapot(self, szoveg):
+    def allapot(self, szoveg: str) -> None:
         self.v_allapot.set(szoveg)
 
     # ------------------------------------------------- könyvtárak, útvonalak
 
-    def _konyvtar_felvesz(self, ut):
+    def _konyvtar_felvesz(self, ut: str | os.PathLike[str] | None) -> None:
         if not ut:
             return
-        ut = engine.normalize_target(ut)
-        if engine.is_root_like(ut):
+        utvonal = engine.normalize_target(ut)
+        if engine.is_root_like(utvonal):
             messagebox.showerror(CIM, "A gyökérkönyvtárat biztonsági okból nem "
-                                      "takarítjuk:\n%s" % ut)
+                                      f"takarítjuk:\n{utvonal}")
             return
-        if not ut.is_dir():
+        if not utvonal.is_dir():
             messagebox.showerror(CIM, "Nincs ilyen könyvtár (vagy nem érhető "
-                                      "el):\n%s" % ut)
+                                      f"el):\n{utvonal}")
             return
-        meglevo = [engine.norm_key(x) for x in self.lista_kony.get(0, "end")]
-        if engine.norm_key(str(ut)) in meglevo:
+        meglevo = {engine.path_key(x) for x in self.lista_kony.get(0, "end")}
+        if engine.path_key(utvonal) in meglevo:
             return
-        self.lista_kony.insert("end", str(ut))
+        self.lista_kony.insert("end", str(utvonal))
 
-    def konyvtar_tallozas(self):
+    def konyvtar_tallozas(self) -> None:
         self._konyvtar_felvesz(filedialog.askdirectory(title="Vizsgálandó könyvtár"))
 
-    def konyvtar_beiras(self):
+    def konyvtar_beiras(self) -> None:
         self._konyvtar_felvesz(simpledialog.askstring(
             CIM, "Könyvtár útvonala (hálózati megosztás is lehet):",
             initialvalue="\\\\192.168.1.38\\downloads", parent=self.root))
 
-    def konyvtar_kivesz(self):
+    def konyvtar_kivesz(self) -> None:
         for i in reversed(self.lista_kony.curselection()):
             self.lista_kony.delete(i)
 
-    def kuka_tallozas(self):
+    def kuka_tallozas(self) -> None:
         ut = filedialog.askdirectory(title="Kuka könyvtár")
         if ut:
             self.v_kuka.set(str(engine.normalize_target(ut)))
 
-    def utvonal_hozzaad(self):
+    def utvonal_hozzaad(self) -> None:
         tavoli = simpledialog.askstring(
             CIM, "A qBittorrent szerinti útvonal (pl. /downloads):",
             parent=self.root)
@@ -289,19 +311,19 @@ class TakaritoApp:
         if not helyi:
             return
         try:
-            engine.parse_map("%s=%s" % (tavoli, helyi))
+            engine.parse_map(f"{tavoli}={helyi}")
         except ValueError as exc:
             messagebox.showerror(CIM, str(exc))
             return
-        self.lista_ut.insert("end", "%s=%s" % (tavoli.strip(), helyi.strip()))
+        self.lista_ut.insert("end", f"{tavoli.strip()}={helyi.strip()}")
 
-    def utvonal_kivesz(self):
+    def utvonal_kivesz(self) -> None:
         for i in reversed(self.lista_ut.curselection()):
             self.lista_ut.delete(i)
 
     # -------------------------------------------------------- beállítás-fájl
 
-    def beallitasok_mentese(self, csendben=False):
+    def beallitasok_mentese(self, csendben: bool = False) -> None:
         adat = {
             "url": self.v_url.get(),
             "user": self.v_user.get(),
@@ -317,61 +339,76 @@ class TakaritoApp:
             "utvonalak": list(self.lista_ut.get(0, "end")),
         }
         fajl = beallitas_fajl()
+        # Előbb egy ideiglenes fájlba írunk, és csak utána cseréljük le a
+        # régit: egy félbeszakadt mentés így nem teszi tönkre a meglévőt.
+        ideiglenes = fajl.with_name(fajl.name + ".uj")
         try:
             fajl.parent.mkdir(parents=True, exist_ok=True)
-            with open(str(fajl), "w", encoding="utf-8") as fh:
-                json.dump(adat, fh, ensure_ascii=False, indent=2)
+            ideiglenes.write_text(
+                json.dumps(adat, ensure_ascii=False, indent=2), encoding="utf-8")
+            # A fájlban jelszó is lehet: csak a tulajdonos olvashassa.
+            # (Windowson / hálózati meghajtón nincs mit beállítani.)
+            with contextlib.suppress(OSError):
+                os.chmod(ideiglenes, 0o600)
+            os.replace(ideiglenes, fajl)
         except OSError as exc:
+            ideiglenes.unlink(missing_ok=True)
             if not csendben:
-                messagebox.showerror(CIM, "Nem sikerült menteni:\n%s" % exc)
+                messagebox.showerror(CIM, f"Nem sikerült menteni:\n{exc}")
             return
         if not csendben:
-            self.allapot("Beállítások elmentve: %s" % fajl)
+            self.allapot(f"Beállítások elmentve: {fajl}")
 
-    def beallitasok_betoltese(self):
+    def beallitasok_betoltese(self) -> None:
         fajl = beallitas_fajl()
         try:
-            with open(str(fajl), encoding="utf-8") as fh:
-                adat = json.load(fh)
+            adat = json.loads(fajl.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
+        if not isinstance(adat, dict):
+            return
         self.v_url.set(adat.get("url") or self.v_url.get())
-        self.v_user.set(adat.get("user", ""))
+        self.v_user.set(str(adat.get("user", "")))
         self.v_pw_mentes.set(bool(adat.get("jelszo_mentese")))
-        self.v_pw.set(adat.get("jelszo", ""))
+        self.v_pw.set(str(adat.get("jelszo", "")))
         self.lista_kony.delete(0, "end")
-        for ut in adat.get("konyvtarak", []):
+        for ut in _szoveglista(adat.get("konyvtarak")):
             self.lista_kony.insert("end", ut)
-        self.v_mod.set(adat.get("mod", "felso"))
+        self.v_mod.set("fa" if adat.get("mod") == "fa" else "felso")
         self.v_pontos.set(bool(adat.get("pontos")))
-        self.v_kivetel.set(adat.get("kivetelek", ""))
+        self.v_kivetel.set(str(adat.get("kivetelek", "")))
         self.v_min_kor.set(str(adat.get("min_kor", "0")))
         self.v_kuka_be.set(bool(adat.get("kuka_be")))
-        self.v_kuka.set(adat.get("kuka", ""))
+        self.v_kuka.set(str(adat.get("kuka", "")))
         self.lista_ut.delete(0, "end")
-        for sor in adat.get("utvonalak", []):
+        for sor in _szoveglista(adat.get("utvonalak")):
             self.lista_ut.insert("end", sor)
         self._mod_valtas()
         self._kuka_valtas()
 
-    def kilepes(self):
+    def kilepes(self) -> None:
         self.beallitasok_mentese(csendben=True)
+        # A figyelő időzítőt le kell mondani: a destroy() után elsülve már
+        # nem létező ablakhoz nyúlna (TclError).
+        if self._figyelo is not None:
+            self.root.after_cancel(self._figyelo)
+            self._figyelo = None
         self.root.destroy()
 
     # ------------------------------------------------------------ vizsgálat
 
-    def _beallitasok_osszeszedese(self):
+    def _beallitasok_osszeszedese(self) -> dict[str, Any] | None:
         """A felületről összeszedett beállítások. Hiba esetén None (és szól)."""
         url = self.v_url.get().strip()
         if not url:
             messagebox.showerror(CIM, "Add meg a qBittorrent WebUI címét.")
             return None
 
-        konyvtarak = []
+        konyvtarak: list[Path] = []
         for szoveg in self.lista_kony.get(0, "end"):
             ut = engine.normalize_target(szoveg)
             if not ut.is_dir():
-                messagebox.showerror(CIM, "Nem érhető el a könyvtár:\n%s" % ut)
+                messagebox.showerror(CIM, f"Nem érhető el a könyvtár:\n{ut}")
                 return None
             konyvtarak.append(ut)
         if not konyvtarak:
@@ -385,6 +422,10 @@ class TakaritoApp:
             messagebox.showerror(CIM, "A „csak ennél régebbi” mező csak szám "
                                       "lehet.")
             return None
+        if min_kor < 0:
+            messagebox.showerror(CIM, "A „csak ennél régebbi” mező nem lehet "
+                                      "negatív.")
+            return None
 
         try:
             utvonalak = [engine.parse_map(sor)
@@ -393,7 +434,7 @@ class TakaritoApp:
             messagebox.showerror(CIM, str(exc))
             return None
 
-        kuka = None
+        kuka: Path | None = None
         if self.v_kuka_be.get():
             if not self.v_kuka.get().strip():
                 messagebox.showerror(CIM, "Add meg a kuka könyvtárát.")
@@ -402,9 +443,10 @@ class TakaritoApp:
             try:
                 kuka.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                messagebox.showerror(CIM, "Nem tudom létrehozni a kukát:\n%s" % exc)
+                messagebox.showerror(CIM, f"Nem tudom létrehozni a kukát:\n{exc}")
                 return None
-            if any(kuka == k for k in konyvtarak):
+            kuka_kulcs = engine.path_key(kuka)
+            if any(kuka_kulcs == engine.path_key(k) for k in konyvtarak):
                 messagebox.showerror(CIM, "A kuka nem lehet maga a vizsgált "
                                           "könyvtár.")
                 return None
@@ -418,44 +460,57 @@ class TakaritoApp:
             "mod": self.v_mod.get(),
             "pontos": self.v_pontos.get(),
             "utvonalak": utvonalak,
-            "kivetelek": kivetelek + engine.DEFAULT_EXCLUDES,
+            "kivetelek": kivetelek + list(engine.DEFAULT_EXCLUDES),
             "min_kor": min_kor,
             "kuka": kuka,
         }
 
-    def _munka_indul(self, szoveg):
+    def _munka_indul(self, szoveg: str) -> None:
         self.dolgozik = True
         self.b_proba.configure(state="disabled")
         self.b_torles.configure(state="disabled")
         self.halado.start(12)
         self.allapot(szoveg)
 
-    def _munka_vege(self):
+    def _munka_vege(self) -> None:
         self.dolgozik = False
         self.halado.stop()
         self.b_proba.configure(state="normal")
         self.b_torles.configure(
             state="normal" if self.pipaltak else "disabled")
 
-    def kapcsolat_proba(self):
+    def _hatterben(self, munka: Callable[[], tuple[Any, ...]]) -> None:
+        """Elindít egy háttérszálat. Bármi is történik odabent, az eredmény (vagy
+        a hiba) beérkezik a sorba – enélkül egy váratlan kivétel örökre
+        „dolgozik” állapotban hagyná az ablakot."""
+        def torzs() -> None:
+            try:
+                valasz = munka()
+            except engine.QbtError as exc:
+                valasz = ("hiba", str(exc))
+            except OSError as exc:
+                valasz = ("hiba", f"Fájlrendszer hiba: {exc}")
+            except Exception as exc:  # noqa: BLE001 - az ablak nem fagyhat le
+                valasz = ("hiba", f"Váratlan hiba: {exc!r}")
+            self.uzenetek.put(valasz)
+
+        threading.Thread(target=torzs, daemon=True).start()
+
+    def kapcsolat_proba(self) -> None:
         if self.dolgozik:
             return
+        url = self.v_url.get().strip()
+        user = self.v_user.get().strip()
+        jelszo = self.v_pw.get()
         self._munka_indul("Kapcsolódás…")
-        szal = threading.Thread(target=self._kapcsolat_szal, args=(
-            self.v_url.get().strip(), self.v_user.get().strip(), self.v_pw.get()),
-            daemon=True)
-        szal.start()
+        self._hatterben(lambda: self._kapcsolat_szal(url, user, jelszo))
 
-    def _kapcsolat_szal(self, url, user, jelszo):
-        try:
-            kliens = engine.QbtClient(url, user, jelszo)
-            kliens.login()
-            valasz = ("kapcsolat", kliens.version(), len(kliens.torrents()))
-        except engine.QbtError as exc:
-            valasz = ("hiba", str(exc))
-        self.uzenetek.put(valasz)
+    def _kapcsolat_szal(self, url: str, user: str, jelszo: str) -> tuple[Any, ...]:
+        kliens = engine.QbtClient(url, user, jelszo)
+        kliens.login()
+        return ("kapcsolat", kliens.version(), len(kliens.torrents()))
 
-    def vizsgalat(self):
+    def vizsgalat(self) -> None:
         if self.dolgozik:
             return
         beall = self._beallitasok_osszeszedese()
@@ -464,35 +519,33 @@ class TakaritoApp:
         self.fa.delete(*self.fa.get_children())
         self.elemek = []
         self.pipaltak = set()
+        self.sor_index = {}
+        self.vizsgalt_konyvtarak = list(beall["konyvtarak"])
         self._munka_indul("Torrentek lekérése, majd a könyvtárak átnézése…")
-        threading.Thread(target=self._vizsgalat_szal, args=(beall,),
-                         daemon=True).start()
+        self._hatterben(lambda: self._vizsgalat_szal(beall))
 
-    def _vizsgalat_szal(self, beall):
+    def _vizsgalat_szal(self, beall: dict[str, Any]) -> tuple[Any, ...]:
         """Külön szálon: WebUI lekérdezés + a könyvtárak átnézése. Tkinterhez
-        nem nyúlhat, csak üzenetet küld."""
-        try:
-            kliens = engine.QbtClient(beall["url"], beall["user"], beall["jelszo"])
-            kliens.login()
-            torrentek = kliens.torrents()
-            fajlok = {}
-            if beall["mod"] == "fa" and beall["pontos"]:
-                for torrent in torrentek:
-                    azon = torrent.get("hash") or ""
-                    if azon:
-                        fajlok[azon] = kliens.files(azon)
-            elemek = engine.plan_all(
-                torrentek, fajlok, beall["konyvtarak"], beall["mod"],
-                beall["utvonalak"], beall["kivetelek"], True, beall["min_kor"],
-                extra_protected=[beall["kuka"]] if beall["kuka"] else ())
-            self.uzenetek.put(("vizsgalat", len(torrentek), elemek))
-        except engine.QbtError as exc:
-            self.uzenetek.put(("hiba", str(exc)))
-        except OSError as exc:  # pragma: no cover - fájlrendszer hiba
-            self.uzenetek.put(("hiba", "Fájlrendszer hiba: %s" % exc))
+        nem nyúlhat, csak az eredményt adja vissza."""
+        kliens = engine.QbtClient(beall["url"], beall["user"], beall["jelszo"])
+        kliens.login()
+        torrentek = kliens.torrents()
+        fajlok: dict[str, list[dict[str, Any]]] = {}
+        if beall["mod"] == "fa" and beall["pontos"]:
+            for torrent in torrentek:
+                azon = torrent.get("hash") or ""
+                if azon:
+                    fajlok[azon] = kliens.files(azon)
+        elemek = engine.plan_all(
+            torrentek, fajlok, beall["konyvtarak"],
+            mode=beall["mod"], maps=beall["utvonalak"],
+            excludes=beall["kivetelek"], min_age_days=beall["min_kor"],
+            extra_protected=[beall["kuka"]] if beall["kuka"] else ())
+        return ("vizsgalat", len(torrentek), elemek)
 
-    def _elemek_kiirasa(self, elemek, pipalva=True):
-        self.elemek = elemek
+    def _elemek_kiirasa(self, elemek: Sequence[engine.Candidate],
+                        pipalva: bool = True) -> None:
+        self.elemek = list(elemek)
         self.pipaltak = set(range(len(elemek))) if pipalva else set()
         self.sor_index = {}
         self.fa.delete(*self.fa.get_children())
@@ -503,7 +556,7 @@ class TakaritoApp:
                 engine.human(elem.size), str(elem.path)))
             self.sor_index[sor] = i
 
-    def sor_kattintas(self, esemeny):
+    def sor_kattintas(self, esemeny: tk.Event[Any]) -> None:
         """Az első oszlopra kattintva ki/be pipál egy sort."""
         if self.dolgozik or self.fa.identify_region(esemeny.x, esemeny.y) != "cell":
             return
@@ -511,7 +564,7 @@ class TakaritoApp:
             return
         self.pipa_valt(self.fa.identify_row(esemeny.y))
 
-    def pipa_valt(self, sor):
+    def pipa_valt(self, sor: str) -> None:
         """Egy sor ki/be pipálása."""
         index = self.sor_index.get(sor)
         if index is None:
@@ -524,7 +577,7 @@ class TakaritoApp:
             self.fa.set(sor, "pipa", "☑")
         self._osszegzes()
 
-    def mindet_valt(self):
+    def mindet_valt(self) -> None:
         if self.dolgozik or not self.elemek:
             return
         mind = len(self.pipaltak) < len(self.elemek)
@@ -533,102 +586,114 @@ class TakaritoApp:
             self.fa.set(sor, "pipa", "☑" if index in self.pipaltak else "☐")
         self._osszegzes()
 
-    def _osszegzes(self):
+    def _osszegzes(self) -> None:
         meret = sum(self.elemek[i].size for i in self.pipaltak)
         self.b_torles.configure(state="normal" if self.pipaltak else "disabled")
-        self.allapot("%d elem kipipálva, összesen %s."
-                     % (len(self.pipaltak), engine.human(meret)))
+        self.allapot(f"{len(self.pipaltak)} elem kipipálva, összesen "
+                     f"{engine.human(meret)}.")
 
     # --------------------------------------------------------------- törlés
 
-    def torles(self):
+    def torles(self) -> None:
         if self.dolgozik or not self.pipaltak:
             return
         beall = self._beallitasok_osszeszedese()
         if not beall:
             return
-        valasztott = [self.elemek[i] for i in sorted(self.pipaltak)]
+        indexek = sorted(self.pipaltak)
+        valasztott = [self.elemek[i] for i in indexek]
         meret = sum(c.size for c in valasztott)
         if beall["kuka"]:
-            kerdes = ("%d elemet mozgatok a kukába (%s):\n%s\n\nMehet?"
-                      % (len(valasztott), engine.human(meret), beall["kuka"]))
+            kerdes = (f"{len(valasztott)} elemet mozgatok a kukába "
+                      f"({engine.human(meret)}):\n{beall['kuka']}\n\nMehet?")
         else:
-            kerdes = ("%d elem VÉGLEGES törlése, összesen %s.\n\n"
-                      "Ez nem vonható vissza. Biztos?"
-                      % (len(valasztott), engine.human(meret)))
+            kerdes = (f"{len(valasztott)} elem VÉGLEGES törlése, összesen "
+                      f"{engine.human(meret)}.\n\n"
+                      "Ez nem vonható vissza. Biztos?")
         if not messagebox.askyesno(CIM, kerdes, icon="warning", default="no"):
             return
+        # A vizsgálatkor érvényes könyvtárlistához mérünk, nem a mostanihoz.
+        konyvtarak = self.vizsgalt_konyvtarak or beall["konyvtarak"]
         self._munka_indul("Törlés…")
-        threading.Thread(target=self._torles_szal,
-                         args=(valasztott, beall["konyvtarak"], beall["kuka"]),
-                         daemon=True).start()
+        self._hatterben(lambda: self._torles_szal(
+            indexek, valasztott, konyvtarak, beall["kuka"]))
 
-    def _torles_szal(self, elemek, konyvtarak, kuka):
-        kesz, hibak, felszabadult = [], [], 0
-        for elem in elemek:
+    def _torles_szal(
+        self,
+        indexek: Sequence[int],
+        elemek: Sequence[engine.Candidate],
+        konyvtarak: Sequence[Path],
+        kuka: Path | None,
+    ) -> tuple[Any, ...]:
+        kesz: set[int] = set()
+        hibak: list[tuple[engine.Candidate, str]] = []
+        felszabadult = 0
+        for index, elem in zip(indexek, elemek, strict=True):
             gazda = engine.owner_target(elem.path, konyvtarak)
             siker, uzenet = engine.remove_entry(elem, gazda, kuka)
             if siker:
-                kesz.append(elem)
+                kesz.add(index)
                 felszabadult += elem.size
             else:
                 hibak.append((elem, uzenet))
-        self.uzenetek.put(("torles", kesz, hibak, felszabadult))
+        return ("torles", kesz, hibak, felszabadult)
 
     # ----------------------------------------------------- üzenetek kezelése
 
-    def _sor_figyelese(self):
+    def _sor_figyelese(self) -> None:
         try:
             while True:
                 self._uzenet(self.uzenetek.get_nowait())
         except queue.Empty:
             pass
-        self.root.after(100, self._sor_figyelese)
+        self._figyelo = self.root.after(FIGYELES_MP, self._sor_figyelese)
 
-    def _uzenet(self, uzenet):
+    def _uzenet(self, uzenet: tuple[Any, ...]) -> None:
         fajta = uzenet[0]
         if fajta == "kapcsolat":
             _, verzio, darab = uzenet
             self._munka_vege()
-            self.allapot("Kapcsolódva: qBittorrent %s, %d torrent."
-                         % (verzio, darab))
+            self.allapot(f"Kapcsolódva: qBittorrent {verzio}, {darab} torrent.")
         elif fajta == "vizsgalat":
             _, torrentek, elemek = uzenet
             self._elemek_kiirasa(elemek)
             self._munka_vege()
             if not elemek:
-                self.allapot("%d torrent – nincs felesleges elem, nincs mit "
-                             "tenni." % torrentek)
+                self.allapot(f"{torrentek} torrent – nincs felesleges elem, "
+                             "nincs mit tenni.")
             else:
                 self._osszegzes()
         elif fajta == "torles":
             _, kesz, hibak, felszabadult = uzenet
-            toroltek = {id(c) for c in kesz}
-            maradek = [c for c in self.elemek if id(c) not in toroltek]
+            maradek = [c for i, c in enumerate(self.elemek) if i not in kesz]
             # A megmaradt sorok kipipálatlanok lesznek: amit a felhasználó most
             # szándékosan kihagyott, azt egy újabb kattintás ne törölje.
             self._elemek_kiirasa(maradek, pipalva=False)
             self._munka_vege()
-            self.allapot("Kész: %d elem, %s felszabadulva.%s"
-                         % (len(kesz), engine.human(felszabadult),
-                            "  %d elemet nem sikerült!" % len(hibak) if hibak else ""))
+            baj = f"  {len(hibak)} elemet nem sikerült!" if hibak else ""
+            self.allapot(f"Kész: {len(kesz)} elem, {engine.human(felszabadult)} "
+                         f"felszabadulva.{baj}")
             if hibak:
-                reszletek = "\n".join("%s\n    %s" % (c.path, u)
-                                      for c, u in hibak[:10])
+                reszletek = "\n".join(f"{c.path}\n    {u}" for c, u in hibak[:10])
                 messagebox.showwarning(
-                    CIM, "Néhány elemet nem sikerült törölni:\n\n%s" % reszletek)
+                    CIM, f"Néhány elemet nem sikerült törölni:\n\n{reszletek}")
         elif fajta == "hiba":
             self._munka_vege()
             self.allapot("Hiba – semmit nem töröltem.")
             messagebox.showerror(CIM, uzenet[1])
 
 
-def main():
+def main() -> int:
+    if sys.version_info < engine.MIN_PYTHON:
+        kell = ".".join(str(x) for x in engine.MIN_PYTHON)
+        print(f"Tul regi Python: {sys.version.split()[0]} (legalabb {kell} kell).",
+              file=sys.stderr)
+        return 2
     root = tk.Tk()
     try:
         TakaritoApp(root)
     except Exception as exc:  # pragma: no cover - indulási hiba
-        messagebox.showerror(CIM, "Nem sikerült elindulni:\n%s" % exc)
+        messagebox.showerror(CIM, f"Nem sikerült elindulni:\n{exc}")
         raise
     root.mainloop()
     return 0

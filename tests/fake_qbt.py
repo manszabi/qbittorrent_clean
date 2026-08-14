@@ -87,7 +87,7 @@ def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return "http://127.0.0.1:%d" % server.server_address[1], server
+    return f"http://127.0.0.1:{server.server_address[1]}", server
 
 
 def build_tree(base):

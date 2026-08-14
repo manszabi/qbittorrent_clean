@@ -7,7 +7,7 @@ majd a megadott konyvtar(ak)ban - peldaul egy Samba megosztason - megkeresi
 azokat a fajlokat es konyvtarakat, amikhez nem tartozik torrent. Ezeket
 alapbol csak KIIRJA; torolni kulon kapcsoloval (--torol) fog.
 
-Kulso csomag nem kell hozza, csak Python 3.7 vagy ujabb.
+Kulso csomag nem kell hozza, csak Python 3.10 vagy ujabb.
 
 Gyors pelda (eloszor mindig szarazon!):
 
@@ -43,10 +43,14 @@ Tobb konyvtar is megadhato. Ezek automatikusan vedik egymast: ha a
 takaritasakor az "rss" mappat nem bantja a program.
 """
 
+from __future__ import annotations
+
 import argparse
+import contextlib
 import fnmatch
 import getpass
 import http.cookiejar
+import itertools
 import json
 import os
 import shutil
@@ -58,14 +62,21 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 API = "/api/v2"
+
+# Ennel regebbi Pythonon a program nem indul el (a regebbi kiadasok mar nem
+# kapnak biztonsagi javitast sem).
+MIN_PYTHON = (3, 10)
 
 # Ezeket soha nem bantjuk (a NAS vagy az operacios rendszer keszitette oket).
 # Sajat minta a --kivetel kapcsoloval adhato hozza, ez a lista pedig a
 # --nincs-gyari-kivetel kapcsoloval kapcsolhato ki.
-DEFAULT_EXCLUDES = [
+DEFAULT_EXCLUDES: tuple[str, ...] = (
     ".recycle",
     "#recycle",
     "@Recycle",
@@ -76,10 +87,15 @@ DEFAULT_EXCLUDES = [
     "$RECYCLE.BIN",
     "System Volume Information",
     ".unwanted",  # ide teszi a qBittorrent a nem kert fajlokat
-]
+)
 
 # A qBittorrent ezt biggyeszti a felkesz fajlok vegere (ha be van kapcsolva).
 INCOMPLETE_SUFFIX = ".!qB"
+
+# A qBittorrent egy torrentjenek leiroja (a WebUI JSON valasza), illetve egy
+# utvonal-megfeleltetes: (a qBittorrent szerinti ut, a helyi ut).
+Torrent = Mapping[str, Any]
+PathMap = tuple[str, str]
 
 
 class QbtError(Exception):
@@ -97,15 +113,21 @@ class QbtClient:
     """A qBittorrent WebUI (v2 API) minimalis kliense, csak a szabvany
     konyvtarral."""
 
-    def __init__(self, url, username=None, password=None, timeout=30,
-                 insecure=False):
+    def __init__(
+        self,
+        url: str,
+        username: str | None = None,
+        password: str | None = None,
+        timeout: float = 30,
+        insecure: bool = False,
+    ) -> None:
         self.base = url.rstrip("/")
         if not self.base.startswith(("http://", "https://")):
             self.base = "http://" + self.base
         self.username = username
         self.password = password
         self.timeout = timeout
-        ctx = None
+        ctx: ssl.SSLContext | None = None
         if insecure:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -115,7 +137,12 @@ class QbtClient:
             urllib.request.HTTPSHandler(context=ctx),
         )
 
-    def _call(self, path, params=None, post=False):
+    def _call(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        post: bool = False,
+    ) -> str:
         url = self.base + path
         data = None
         if params and post:
@@ -132,10 +159,8 @@ class QbtClient:
                 return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             body = ""
-            try:
+            with contextlib.suppress(OSError):  # a valasz mar elszallhatott
                 body = exc.read().decode("utf-8", "replace").strip()
-            except Exception:  # pragma: no cover
-                pass
             if exc.code == 403:
                 raise QbtError(
                     "A WebUI elutasitotta a kerest (403). Rossz jelszo, lejart "
@@ -143,18 +168,18 @@ class QbtClient:
                     "hivatkozas tiltasa."
                 ) from exc
             raise QbtError(
-                "HTTP %s a %s hivasnal%s"
-                % (exc.code, path, (": " + body) if body else "")
+                f"HTTP {exc.code} a {path} hivasnal"
+                + (f": {body}" if body else "")
             ) from exc
         except urllib.error.URLError as exc:
             raise QbtError(
-                "Nem sikerult elerni a qBittorrent WebUI-t (%s): %s"
-                % (self.base, exc.reason)
+                f"Nem sikerult elerni a qBittorrent WebUI-t ({self.base}): "
+                f"{exc.reason}"
             ) from exc
-        except (TimeoutError, OSError) as exc:
-            raise QbtError("Halozati hiba a %s hivasnal: %s" % (path, exc)) from exc
+        except OSError as exc:
+            raise QbtError(f"Halozati hiba a {path} hivasnal: {exc}") from exc
 
-    def login(self):
+    def login(self) -> None:
         """Bejelentkezes. Ures felhasznalonevnel kihagyjuk - van, ahol a helyi
         halozatrol nem ker azonositast a WebUI."""
         if not self.username:
@@ -166,68 +191,120 @@ class QbtClient:
         ).strip()
         if answer.lower() != "ok.":
             raise QbtError(
-                "Sikertelen bejelentkezes (a WebUI valasza: %r). Ellenorizd a "
-                "felhasznalonevet es a jelszot." % answer
+                f"Sikertelen bejelentkezes (a WebUI valasza: {answer!r}). "
+                "Ellenorizd a felhasznalonevet es a jelszot."
             )
 
-    def version(self):
+    def version(self) -> str:
         return self._call(API + "/app/version").strip()
 
-    def torrents(self):
+    def torrents(self) -> list[dict[str, Any]]:
         data = self._json(API + "/torrents/info", None, "torrents/info")
         if not isinstance(data, list):
             raise QbtError("Varatlan valasz a torrents/info hivasra")
         return data
 
-    def files(self, torrent_hash):
+    def files(self, torrent_hash: str) -> list[dict[str, Any]]:
         data = self._json(API + "/torrents/files", {"hash": torrent_hash},
                           "torrents/files")
         if not isinstance(data, list):
-            raise QbtError("Varatlan fajllista a(z) %s torrenthez" % torrent_hash)
+            raise QbtError(f"Varatlan fajllista a(z) {torrent_hash} torrenthez")
         return data
 
-    def _json(self, path, params, what):
+    def _json(self, path: str, params: dict[str, str] | None, what: str) -> Any:
         text = self._call(path, params)
         try:
             return json.loads(text)
         except ValueError as exc:
-            raise QbtError("Ertelmezhetetlen valasz a %s hivasra" % what) from exc
+            raise QbtError(f"Ertelmezhetetlen valasz a {what} hivasra") from exc
 
 
 # --------------------------------------------------------- utvonal-kezeles
 
-def norm_key(text, ignore_case=True):
+def _nfc(text: str) -> str:
+    """Egysegesitett Unicode alak. A Samba / macOS ugyanazt az ekezetes betut
+    ketfelekeppen is tarolhatja ("o" + kalap, vagy egyben)."""
+    return unicodedata.normalize("NFC", text)
+
+
+def norm_key(text: str, ignore_case: bool = True) -> str:
     """Osszehasonlitashoz hasznalt alak. A Samba / macOS ugyanazt a nevet
     maskepp is kodolhatja (ekezetek), ezert egysegesitjuk, es alapbol a
     kis/nagybetut sem nezzuk - igy inkabb megtartunk valamit, mint hogy
     tevedesbol toroljuk."""
-    text = unicodedata.normalize("NFC", text)
+    text = _nfc(text)
     return text.casefold() if ignore_case else text
 
 
-def normalize_remote(path):
+def path_key(value: str | os.PathLike[str], ignore_case: bool = True) -> str:
+    """Egy teljes utvonal osszehasonlitasi kulcsa.
+
+    A Windows visszafele dolo perjelet hasznal, a qBittorrent (es a UNC alak)
+    viszont elore dolot. Ha a ketto keveredik, egyetlen utvonal sem egyezne
+    meg, es a program a torrentekhez tartozo fajlokat is feleslegesnek latna -
+    ezert itt egysegesitjuk, es a vegzodo perjelet is levagjuk.
+    """
+    text = str(value).replace("\\", "/")
+    while len(text) > 1 and text.endswith("/"):
+        text = text[:-1]
+    return norm_key(text, ignore_case)
+
+
+def under(key: str, parent_key: str) -> bool:
+    """Igaz, ha a `key` maga a `parent_key`, vagy alatta van. Mindketto
+    path_key() alakban var."""
+    if key == parent_key:
+        return True
+    prefix = parent_key if parent_key.endswith("/") else parent_key + "/"
+    return key.startswith(prefix)
+
+
+def strip_prefix(text: str, prefix: str, ignore_case: bool = True) -> str | None:
+    """A `text` maradeka a `prefix` utan, vagy None, ha nem azzal kezdodik.
+
+    Azert kell ehhez kulon fuggveny, mert a levagas hosszal dolgozik, a
+    normalizalas viszont valtoztathat a hosszon: a casefold() peldaul a nemet
+    "sz"-bol ket betut csinal, az ekezetek osszevonasa pedig rovidit. Ha a
+    hasonlitas a normalizalt, a levagas meg az eredeti alakon tortenne (mint
+    korabban), akkor mas helyre esne a vagas, es hibas utvonal jonne ki.
+    Ezert eloszor mindket oldalt NFC-re hozzuk - ez rogziti a hosszakat -, es
+    csak az igy kimert eleje-reszt vetjuk ossze.
+    """
+    text_nfc = _nfc(text)
+    prefix_nfc = _nfc(prefix)
+    head = text_nfc[:len(prefix_nfc)]
+    if len(head) < len(prefix_nfc):
+        return None
+    same = (head.casefold() == prefix_nfc.casefold() if ignore_case
+            else head == prefix_nfc)
+    return text_nfc[len(prefix_nfc):] if same else None
+
+
+def normalize_remote(path: str) -> str:
     """A qBittorrent Windows alatt visszafele dolo perjelet ad vissza; a UNC
     eleji ket perjelet megtartjuk."""
     if not path:
         return ""
-    path = path.replace("\\", "/")
+    text = str(path).replace("\\", "/")
     prefix = ""
-    if path.startswith("//"):
-        prefix, path = "//", path[2:]
-    while len(path) > 1 and path.endswith("/"):
-        path = path[:-1]
-    return prefix + path
+    if text.startswith("//"):
+        prefix, text = "//", text[2:]
+    while "//" in text:  # a dupla perjel kulonben elrontana az osszevetest
+        text = text.replace("//", "/")
+    while len(text) > 1 and text.endswith("/"):
+        text = text[:-1]
+    return prefix + text
 
 
 # ------------------------------------------------------------------ konyvtar
 
-def normalize_target(raw):
+def normalize_target(raw: str | os.PathLike[str]) -> Path:
     """A megadott konyvtar egysegesitese. A UNC utvonalat (\\\\gep\\megosztas)
     nem 'oldjuk fel', mert a resolve() halozati megosztason lassu lehet es
     Windowson at is irhatja az alakjat; csak a felesleges vegzodest vagjuk le."""
     path = Path(os.path.expanduser(str(raw)))
     text = str(path)
-    if not text.startswith("\\\\") and not text.startswith("//"):
+    if not text.startswith(("\\\\", "//")):
         try:
             path = path.resolve()
         except OSError:
@@ -235,12 +312,11 @@ def normalize_target(raw):
     return path
 
 
-def is_unc(path):
-    text = str(path)
-    return text.startswith("\\\\") or text.startswith("//")
+def is_unc(path: str | os.PathLike[str]) -> bool:
+    return str(path).startswith(("\\\\", "//"))
 
 
-def is_root_like(path):
+def is_root_like(path: Path) -> bool:
     """Gyoker konyvtar (/, C:\\), amit biztonsagi okbol nem takaritunk. A UNC
     megosztas gyokere (\\\\gep\\megosztas) viszont rendben van - tipikusan pont
     az a letoltesi konyvtar."""
@@ -250,7 +326,7 @@ def is_root_like(path):
     return len(path.parts) < 2 or str(path) == path.anchor
 
 
-def parse_map(entry):
+def parse_map(entry: str) -> PathMap:
     """A '--utvonal TAVOLI=HELYI' feldolgozasa. Az elso egyenlosegjelnel
     vagunk, igy a helyi oldal lehet meghajtobetus (D:\\letoltes) vagy UNC
     (\\\\gep\\megosztas) utvonal is."""
@@ -263,41 +339,45 @@ def parse_map(entry):
     remote = normalize_remote(remote.strip())
     local = local.strip()
     if not remote or not local:
-        raise ValueError("Ures utvonal a megfeleltetesben: %r" % entry)
+        raise ValueError(f"Ures utvonal a megfeleltetesben: {entry!r}")
     # A helyi oldalt ugyanugy egysegesitjuk, mint a --konyvtar erteket,
     # kulonben ket alakban allna ugyanaz az utvonal, es semmi nem egyezne.
     return (remote, str(normalize_target(local)))
 
 
-def apply_maps(remote_path, maps):
+def apply_maps(
+    remote_path: str,
+    maps: Sequence[PathMap],
+    ignore_case: bool = True,
+) -> str | None:
     """A qBittorrent utvonalabol helyi utvonal. Ha nincs szabaly, valtozatlanul
     hagyjuk. Ha van szabaly, de egyik sem illik ra, None (nem itt van)."""
-    remote_path = normalize_remote(remote_path)
-    if not remote_path:
+    remote = normalize_remote(remote_path)
+    if not remote:
         return None
     if not maps:
-        return remote_path
-    key = norm_key(remote_path)
+        return remote
     # A leghosszabb (legpontosabb) illeszkedes nyer.
     for src, dst in sorted(maps, key=lambda m: len(m[0]), reverse=True):
-        src_key = norm_key(src).rstrip("/")
-        if key == src_key:
+        src_clean = normalize_remote(src)
+        if norm_key(remote, ignore_case) == norm_key(src_clean, ignore_case):
             return dst
-        if key.startswith(src_key + "/"):
-            rest = remote_path[len(src.rstrip("/")) + 1:]
+        prefix = src_clean if src_clean.endswith("/") else src_clean + "/"
+        rest = strip_prefix(remote, prefix, ignore_case)
+        if rest:
             return str(Path(dst) / rest)
     return None
 
 
-def root_name(torrent):
+def root_name(torrent: Torrent, ignore_case: bool = True) -> str:
     """A torrent gyoker-eleme: az a fajl vagy konyvtar, ami a mentesi
     konyvtarban letrejon."""
     content = normalize_remote(torrent.get("content_path") or "")
     save = normalize_remote(torrent.get("save_path") or "")
     if content and save:
-        save_slash = save.rstrip("/") + "/"
-        if norm_key(content).startswith(norm_key(save_slash)):
-            first = content[len(save_slash):].split("/", 1)[0]
+        rest = strip_prefix(content, save.rstrip("/") + "/", ignore_case)
+        if rest:
+            first = rest.split("/", 1)[0]
             if first:
                 return first
     if content:
@@ -305,47 +385,51 @@ def root_name(torrent):
     return (torrent.get("name") or "").strip()
 
 
-def owned_names(torrents, ignore_case=True):
+def owned_names(torrents: Iterable[Torrent], ignore_case: bool = True) -> set[str]:
     """A torrentek gyoker-neveinek halmaza (a 'felso' modhoz)."""
-    names = set()
+    names: set[str] = set()
     for torrent in torrents:
-        name = root_name(torrent)
+        name = root_name(torrent, ignore_case)
         if name:
             names.add(norm_key(name, ignore_case))
             names.add(norm_key(name + INCOMPLETE_SUFFIX, ignore_case))
     return names
 
 
-def owned_paths(torrents, files_by_hash, maps, target, ignore_case=True):
+def owned_paths(
+    torrents: Iterable[Torrent],
+    files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+    maps: Sequence[PathMap],
+    target: str | os.PathLike[str],
+    ignore_case: bool = True,
+) -> tuple[set[str], set[str]]:
     """Azok a helyi utvonalak, amik a qBittorrenthez tartoznak.
 
     Ket halmazt ad vissza:
       roots - ezek (es ami alattuk van) erintetlenek maradnak,
       dirs  - ezekbe bele kell nezni, mert alattuk van megtartando elem.
     """
-    roots = set()
-    dirs = set()
-    target = Path(target)
-    target_key = norm_key(str(target), ignore_case).rstrip("/\\")
+    roots: set[str] = set()
+    dirs: set[str] = set()
+    target_key = path_key(target, ignore_case)
 
-    def under_target(key):
-        return key == target_key or key.startswith(target_key + norm_key(os.sep))
-
-    def add(remote):
-        local = apply_maps(remote, maps)
+    def add(remote: str) -> None:
+        local = apply_maps(remote, maps, ignore_case)
         if not local:
             return
         try:
             local_path = Path(local)
         except (OSError, ValueError):
             return
-        key = norm_key(str(local_path), ignore_case).rstrip("/\\")
-        if not under_target(key):
+        key = path_key(local_path, ignore_case)
+        if not under(key, target_key):
             return  # nem a vizsgalt konyvtarban van
         roots.add(key)
         parent = local_path.parent
         while True:
-            pkey = norm_key(str(parent), ignore_case).rstrip("/\\")
+            pkey = path_key(parent, ignore_case)
+            if not under(pkey, target_key):
+                break  # a vizsgalt konyvtar folott mar nincs mit vedeni
             dirs.add(pkey)
             if pkey == target_key or parent == parent.parent:
                 break
@@ -355,7 +439,7 @@ def owned_paths(torrents, files_by_hash, maps, target, ignore_case=True):
         save = normalize_remote(torrent.get("save_path") or "")
         download = normalize_remote(torrent.get("download_path") or "")
         content = normalize_remote(torrent.get("content_path") or "")
-        name = root_name(torrent)
+        name = root_name(torrent, ignore_case)
         files = files_by_hash.get(torrent.get("hash") or "")
 
         if files:
@@ -383,50 +467,48 @@ def owned_paths(torrents, files_by_hash, maps, target, ignore_case=True):
 
 # ---------------------------------------------------------------- tervezes
 
+@dataclass(slots=True)
 class Candidate:
     """Egy torlesre jelolt elem."""
 
-    def __init__(self, path, is_dir, size, reason=""):
-        self.path = Path(path)
-        self.is_dir = is_dir
-        self.size = size
-        self.reason = reason
+    path: Path
+    is_dir: bool
+    size: int
+    reason: str = ""
 
-    def __repr__(self):  # pragma: no cover - csak hibakeresehez
-        return "Candidate(%r, dir=%s, size=%d)" % (
-            str(self.path), self.is_dir, self.size)
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
 
 
-def entry_size(path, is_dir):
+def entry_size(path: str | os.PathLike[str], is_dir: bool) -> int:
     """Egy fajl vagy egy egesz konyvtar merete bajtban."""
     if not is_dir:
         try:
-            return os.path.getsize(path)
+            return os.stat(path, follow_symlinks=False).st_size
         except OSError:
             return 0
     total = 0
-    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+    for root, subdirs, files in os.walk(path, onerror=lambda _exc: None):
         # Szimbolikus linkbe nem megyunk bele.
-        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+        subdirs[:] = [d for d in subdirs
+                      if not os.path.islink(os.path.join(root, d))]
         for name in files:
-            full = os.path.join(root, name)
             try:
-                if not os.path.islink(full):
-                    total += os.path.getsize(full)
+                info = os.stat(os.path.join(root, name), follow_symlinks=False)
             except OSError:
-                pass
+                continue
+            if not stat.S_ISLNK(info.st_mode):
+                total += info.st_size
     return total
 
 
-def is_excluded(name, patterns, ignore_case=True):
+def is_excluded(name: str, patterns: Iterable[str], ignore_case: bool = True) -> bool:
     key = norm_key(name, ignore_case)
-    for pattern in patterns:
-        if fnmatch.fnmatchcase(key, norm_key(pattern, ignore_case)):
-            return True
-    return False
+    return any(fnmatch.fnmatchcase(key, norm_key(pattern, ignore_case))
+               for pattern in patterns)
 
 
-def too_young(path, min_age_days):
+def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
     """Frissen modositott elem: hagyjuk beken (pl. eppen most kerult oda)."""
     if min_age_days <= 0:
         return False
@@ -437,22 +519,30 @@ def too_young(path, min_age_days):
     return (time.time() - mtime) < min_age_days * 86400
 
 
-def scandir_sorted(path):
+def scandir_sorted(path: str | os.PathLike[str]) -> list[os.DirEntry[str]]:
     try:
         with os.scandir(path) as it:
             return sorted(it, key=lambda e: e.name)
     except OSError as exc:
-        raise QbtError("Nem tudom beolvasni a konyvtarat (%s): %s" % (path, exc))
+        raise QbtError(
+            f"Nem tudom beolvasni a konyvtarat ({path}): {exc}") from exc
 
 
-def plan_toplevel(target, names, excludes, ignore_case=True, min_age_days=0,
-                  protected=()):
+def plan_toplevel(
+    target: str | os.PathLike[str],
+    names: set[str],
+    excludes: Iterable[str] = (),
+    ignore_case: bool = True,
+    min_age_days: float = 0,
+    protected: Iterable[str | os.PathLike[str]] = (),
+) -> list[Candidate]:
     """Csak a legfelso szint, nevek alapjan."""
-    out = []
-    protected_keys = {norm_key(str(p), ignore_case).rstrip("/\\") for p in protected}
+    out: list[Candidate] = []
+    excludes = tuple(excludes)
+    protected_keys = {path_key(p, ignore_case) for p in protected}
     for entry in scandir_sorted(target):
         full = Path(target) / entry.name
-        if norm_key(str(full), ignore_case).rstrip("/\\") in protected_keys:
+        if path_key(full, ignore_case) in protected_keys:
             continue
         if is_excluded(entry.name, excludes, ignore_case):
             continue
@@ -469,16 +559,28 @@ def plan_toplevel(target, names, excludes, ignore_case=True, min_age_days=0,
     return out
 
 
-def plan_tree(target, roots, dirs, excludes, ignore_case=True, min_age_days=0,
-              protected=()):
-    """Teljes konyvtarfa, utvonalak alapjan."""
-    out = []
-    protected_keys = {norm_key(str(p), ignore_case).rstrip("/\\") for p in protected}
+def plan_tree(
+    target: str | os.PathLike[str],
+    roots: set[str],
+    dirs: set[str],
+    excludes: Iterable[str] = (),
+    ignore_case: bool = True,
+    min_age_days: float = 0,
+    protected: Iterable[str | os.PathLike[str]] = (),
+) -> list[Candidate]:
+    """Teljes konyvtarfa, utvonalak alapjan.
 
-    def walk(path):
+    Szandekosan nem rekurziv: egy melyen agazo megosztason a rekurzio
+    elfogyna (RecursionError), es a takaritas a felenel allna le."""
+    out: list[Candidate] = []
+    excludes = tuple(excludes)
+    protected_keys = {path_key(p, ignore_case) for p in protected}
+    varolista = [Path(target)]
+    while varolista:
+        path = varolista.pop()
         for entry in scandir_sorted(path):
-            full = Path(path) / entry.name
-            key = norm_key(str(full), ignore_case).rstrip("/\\")
+            full = path / entry.name
+            key = path_key(full, ignore_case)
             if key in protected_keys:
                 continue
             if is_excluded(entry.name, excludes, ignore_case):
@@ -492,20 +594,29 @@ def plan_tree(target, roots, dirs, excludes, ignore_case=True, min_age_days=0,
                 continue
             is_dir = entry.is_dir(follow_symlinks=False)
             if is_dir and key in dirs:
-                walk(full)  # van alatta megtartando elem
+                varolista.append(full)  # van alatta megtartando elem
                 continue
             if too_young(full, min_age_days):
                 continue
             out.append(Candidate(full, is_dir, entry_size(full, is_dir),
                                  "nem tartozik torrenthez"))
-
-    walk(Path(target))
+    out.sort(key=lambda c: path_key(c.path, ignore_case))
     return out
 
 
-def plan_all(torrents, files_by_hash, targets, mode="felso", maps=(), excludes=(),
-             ignore_case=True, min_age_days=0, extra_protected=(),
-             allow_empty=False, on_note=None):
+def plan_all(
+    torrents: Sequence[Torrent],
+    files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+    targets: Sequence[Path],
+    mode: str = "felso",
+    maps: Sequence[PathMap] = (),
+    excludes: Iterable[str] = (),
+    ignore_case: bool = True,
+    min_age_days: float = 0,
+    extra_protected: Iterable[str | os.PathLike[str]] = (),
+    allow_empty: bool = False,
+    on_note: Callable[[Path, int], None] | None = None,
+) -> list[Candidate]:
     """A teljes terv: mely elemekhez nem tartozik mar torrent.
 
     A vizsgalt konyvtarak vedik egymast: ha az egyik a masik alkonyvtara (pl.
@@ -518,8 +629,10 @@ def plan_all(torrents, files_by_hash, targets, mode="felso", maps=(), excludes=(
     if not torrents and not allow_empty:
         raise SafetyStop("A qBittorrentben egyetlen torrent sincs, igy MINDENT "
                          "torolne.")
+    excludes = tuple(excludes)
+    extra_protected = tuple(extra_protected)
     names = owned_names(torrents, ignore_case) if mode == "felso" else set()
-    candidates = []
+    candidates: list[Candidate] = []
     for target in targets:
         protected = [t for t in targets if t != target] + list(extra_protected)
         if mode == "felso":
@@ -532,9 +645,9 @@ def plan_all(torrents, files_by_hash, targets, mode="felso", maps=(), excludes=(
                 on_note(target, len(roots))
             if not roots and not allow_empty:
                 raise SafetyStop(
-                    "Egyetlen torrent-elem sem esik a(z) %s konyvtarba. "
+                    f"Egyetlen torrent-elem sem esik a(z) {target} konyvtarba. "
                     "Valoszinuleg utvonal-megfeleltetes kell (TAVOLI=HELYI). "
-                    "Igy MINDENT torolne, ezert leallok." % target)
+                    "Igy MINDENT torolne, ezert leallok.")
             candidates += plan_tree(target, roots, dirs, excludes, ignore_case,
                                     min_age_days, protected)
     return candidates
@@ -542,50 +655,88 @@ def plan_all(torrents, files_by_hash, targets, mode="felso", maps=(), excludes=(
 
 # ------------------------------------------------------------------ torles
 
-def human(size):
+def human(size: float) -> str:
+    """Ember szamara olvashato meret."""
     value = float(size)
     for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
         if value < 1024 or unit == "PB":
-            return "%d B" % size if unit == "B" else "%.1f %s" % (value, unit)
+            return f"{int(size)} B" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-    return "%d B" % size  # pragma: no cover
+    return f"{int(size)} B"  # pragma: no cover - a ciklus mindig visszater
 
 
-def force_remove(func, path, _exc):
+def force_remove(func: Callable[[Any], Any], path: Any, _exc: object = None) -> None:
     """A megosztason az irasvedett jelzo miatt is elszallhat a torles: levesszuk
-    a jelzot, es ujraprobaljuk."""
+    a jelzot, es ujraprobaljuk.
+
+    A meglevo jogokhoz HOZZAADUNK, nem felulirjuk oket: egy konyvtarnak a
+    belepesi (x) jog is kell, e nelkul a masodik probalkozas is elszallna."""
     try:
-        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        mode = os.stat(path, follow_symlinks=False).st_mode
     except OSError:
-        pass
-    func(path)
+        mode = 0
+    extra = stat.S_IWRITE | stat.S_IREAD
+    if stat.S_ISDIR(mode):
+        extra |= stat.S_IEXEC
+    with contextlib.suppress(OSError):
+        os.chmod(path, stat.S_IMODE(mode) | extra)
+    # Az shutil a konyvtar beolvasasanak hibajara is minket hiv: olyankor a
+    # visszakapott iteratort le kell zarni, kulonben nyitva marad a leiro.
+    result = func(path)
+    close = getattr(result, "close", None)
+    if close is not None:
+        close()
 
 
-def rmtree(path):
+def rmtree(path: str | os.PathLike[str]) -> None:
     """Konyvtar torlese az irasvedett fajlok kezelesevel egyutt."""
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=force_remove)
-    else:
+    else:  # pragma: no cover - csak a regebbi Pythonokon fut
         shutil.rmtree(path, onerror=force_remove)
 
 
-def remove_file(path):
+def remove_file(path: str | os.PathLike[str]) -> None:
     try:
         os.remove(path)
     except PermissionError:
-        force_remove(os.remove, path, None)
+        force_remove(os.remove, path)
 
 
-def owner_target(path, targets):
+def owner_target(
+    path: str | os.PathLike[str],
+    targets: Sequence[str | os.PathLike[str]],
+) -> Path:
     """Melyik vizsgalt konyvtarhoz kepest szamoljuk az elem utvonalat (a
     kukaban ez alapjan jon letre a konyvtar-szerkezet). Egymasba agyazott
     konyvtaraknal a legkulsot valasztjuk, igy nem utik egymast az azonos nevu
     fajlok (pl. rss\\film.mkv es film.mkv)."""
-    owners = sorted(targets, key=lambda t: len(str(t)))
-    return next((t for t in owners if t in Path(path).parents), owners[0])
+    owners = sorted((Path(t) for t in targets), key=lambda t: len(str(t)))
+    if not owners:
+        return Path(path).parent
+    parents = Path(path).parents
+    return next((t for t in owners if t in parents), owners[0])
 
 
-def remove_entry(candidate, target, trash_dir=None):
+def _free_trash_path(dest: Path) -> Path:
+    """Szabad nev a kukaban. Az idobelyeg mellett sorszam is kell: egy
+    masodpercen belul tobb azonos nevu elem is erkezhet."""
+    if not dest.exists() and not dest.is_symlink():
+        return dest
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for counter in itertools.count():
+        suffix = f".{stamp}" if not counter else f".{stamp}-{counter}"
+        candidate = dest.with_name(dest.name + suffix)
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise AssertionError  # pragma: no cover - a ciklus vegtelen
+
+
+def remove_entry(
+    candidate: Candidate,
+    target: str | os.PathLike[str],
+    trash_dir: str | os.PathLike[str] | None = None,
+) -> tuple[bool, str]:
     """Torles, vagy athelyezes a kukaba. Kivetelt nem dob: (siker, uzenet)."""
     path = candidate.path
     try:
@@ -594,25 +745,43 @@ def remove_entry(candidate, target, trash_dir=None):
                 rel = path.relative_to(Path(target))
             except ValueError:
                 rel = Path(path.name)
-            dest = Path(trash_dir) / rel
+            dest = _free_trash_path(Path(trash_dir) / rel)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists() or dest.is_symlink():
-                dest = dest.with_name(
-                    "%s.%s" % (dest.name, time.strftime("%Y%m%d-%H%M%S")))
             shutil.move(str(path), str(dest))
-            return True, "kukaba: %s" % dest
+            return True, f"kukaba: {dest}"
         if path.is_symlink() or not candidate.is_dir:
             remove_file(path)
         else:
             rmtree(path)
         return True, "torolve"
     except OSError as exc:
-        return False, "SIKERTELEN: %s" % exc
+        return False, f"SIKERTELEN: {exc}"
 
 
 # --------------------------------------------------------------------- main
 
-def build_parser():
+def nemnegativ_szam(szoveg: str) -> float:
+    ertek = float(szoveg)  # az argparse maga jelenti, ha nem szam
+    if ertek < 0:
+        raise argparse.ArgumentTypeError("nem lehet negativ")
+    return ertek
+
+
+def pozitiv_szam(szoveg: str) -> float:
+    ertek = float(szoveg)
+    if ertek <= 0:
+        raise argparse.ArgumentTypeError("nullanal nagyobbnak kell lennie")
+    return ertek
+
+
+def nemnegativ_egesz(szoveg: str) -> int:
+    ertek = int(szoveg)
+    if ertek < 0:
+        raise argparse.ArgumentTypeError("nem lehet negativ")
+    return ertek
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qbt_cleanup.py",
         description="A qBittorrentben mar nem szereplo fajlok es konyvtarak "
@@ -648,14 +817,14 @@ def build_parser():
     parser.add_argument("--nincs-gyari-kivetel", dest="no_default_excludes",
                         action="store_true",
                         help="a gyari kivetel-lista (NAS mappak) kikapcsolasa")
-    parser.add_argument("--min-kor", dest="min_age", type=float, default=0,
-                        metavar="NAP",
+    parser.add_argument("--min-kor", dest="min_age", type=nemnegativ_szam,
+                        default=0, metavar="NAP",
                         help="csak az ennel regebben modositott elemeket "
                              "torolje (alap: 0 = mindegy)")
     parser.add_argument("--kuka", default=None, metavar="KONYVTAR",
                         help="torles helyett ide mozgassa az elemeket")
-    parser.add_argument("--max-torles", dest="max_delete", type=int, default=0,
-                        metavar="DB",
+    parser.add_argument("--max-torles", dest="max_delete", type=nemnegativ_egesz,
+                        default=0, metavar="DB",
                         help="ha ennel tobb elemet torolne, inkabb alljon le "
                              "(alap: 0 = nincs korlat)")
     parser.add_argument("--torol", action="store_true",
@@ -672,15 +841,16 @@ def build_parser():
     parser.add_argument("--nem-biztonsagos-tls", dest="insecure",
                         action="store_true",
                         help="https-nel ne ellenorizze a tanusitvanyt")
-    parser.add_argument("--idokorlat", dest="timeout", type=float, default=30,
-                        metavar="MP", help="halozati idokorlat (alap: 30 mp)")
+    parser.add_argument("--idokorlat", dest="timeout", type=pozitiv_szam,
+                        default=30, metavar="MP",
+                        help="halozati idokorlat (alap: 30 mp)")
     return parser
 
 
-def confirm(count, size, trash_dir):
+def confirm(count: int, size: int, trash_dir: Path | None) -> bool:
     print()
-    what = ("athelyez a kukaba (%s)" % trash_dir) if trash_dir else "TOROL VEGLEG"
-    print("Ez %d elemet %s, osszesen %s." % (count, what, human(size)))
+    what = f"athelyez a kukaba ({trash_dir})" if trash_dir else "TOROL VEGLEG"
+    print(f"Ez {count} elemet {what}, osszesen {human(size)}.")
     try:
         answer = input("Biztos? Ird be, hogy 'igen': ").strip().lower()
     except EOFError:
@@ -688,55 +858,73 @@ def confirm(count, size, trash_dir):
     return answer in ("igen", "i", "yes", "y")
 
 
-def main(argv=None):
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:  # pragma: no cover
-            pass
+def _utf8_kimenet() -> None:
+    """A Windows parancssor alapbol nem UTF-8: az utvonalakban levo ekezetes
+    betuk enelkul kiirhatatlanok lennenek (UnicodeEncodeError)."""
+    for adatfolyam in (sys.stdout, sys.stderr):
+        reconfigure = getattr(adatfolyam, "reconfigure", None)
+        if reconfigure is None:  # a tesztekben egy sima StringIO all itt
+            continue
+        with contextlib.suppress(OSError, ValueError):  # pragma: no cover
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def _celkonyvtarak(nyers: Iterable[str], ignore_case: bool) -> list[Path]:
+    """A --konyvtar ertekek ellenorzese. Hiba eseten QbtError."""
+    targets: list[Path] = []
+    latott: set[str] = set()
+    for raw in nyers:
+        target = normalize_target(raw)
+        if not target.exists():
+            raise QbtError(f"Nincs ilyen konyvtar: {target}")
+        if not target.is_dir():
+            raise QbtError(f"Nem konyvtar: {target}")
+        if is_root_like(target):
+            raise QbtError(
+                f"Biztonsagi okbol a gyoker konyvtarat nem takaritom: {target}")
+        # Ugyanaz a konyvtar ketszer megadva ketszer is torolne (masodszor mar
+        # hibaval), ezert csak egyszer vesszuk fel.
+        kulcs = path_key(target, ignore_case)
+        if kulcs not in latott:
+            latott.add(kulcs)
+            targets.append(target)
+    return targets
+
+
+def _main(argv: Sequence[str] | None) -> int:
+    _utf8_kimenet()
 
     args = build_parser().parse_args(argv)
     ignore_case = not args.case_sensitive
 
-    targets = []
-    for raw in args.konyvtarak:
-        target = normalize_target(raw)
-        if not target.exists():
-            print("Nincs ilyen konyvtar: %s" % target, file=sys.stderr)
-            return 2
-        if not target.is_dir():
-            print("Nem konyvtar: %s" % target, file=sys.stderr)
-            return 2
-        if is_root_like(target):
-            print("Biztonsagi okbol a gyoker konyvtarat nem takaritom: %s"
-                  % target, file=sys.stderr)
-            return 2
-        # Ugyanaz a konyvtar ketszer megadva ketszer is torolne (masodszor mar
-        # hibaval), ezert csak egyszer vesszuk fel.
-        if not any(norm_key(str(target), ignore_case) == norm_key(str(t), ignore_case)
-                   for t in targets):
-            targets.append(target)
-
     try:
+        targets = _celkonyvtarak(args.konyvtarak, ignore_case)
         maps = [parse_map(entry) for entry in args.utvonal]
-    except ValueError as exc:
+    except (QbtError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    if args.pontos and args.mod != "fa":
+        print("Figyelem: a --pontos csak a 'fa' modban szamit, most nem hasznalom.",
+              file=sys.stderr)
+    if args.utvonal and args.mod != "fa":
+        print("Figyelem: az --utvonal csak a 'fa' modban szamit.", file=sys.stderr)
 
     excludes = list(args.kivetel)
     if not args.no_default_excludes:
         excludes += DEFAULT_EXCLUDES
 
-    trash_dir = None
+    trash_dir: Path | None = None
     if args.kuka:
         trash_dir = normalize_target(args.kuka)
         try:
             trash_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            print("Nem tudom letrehozni a kukat (%s): %s" % (trash_dir, exc),
+            print(f"Nem tudom letrehozni a kukat ({trash_dir}): {exc}",
                   file=sys.stderr)
             return 2
-        if any(trash_dir == t for t in targets):
+        kuka_kulcs = path_key(trash_dir, ignore_case)
+        if any(kuka_kulcs == path_key(t, ignore_case) for t in targets):
             print("A kuka nem lehet maga a vizsgalt konyvtar.", file=sys.stderr)
             return 2
 
@@ -745,7 +933,7 @@ def main(argv=None):
         password = os.environ.get("QBT_PASSWORD")
     if args.user and password is None:
         if sys.stdin.isatty():
-            password = getpass.getpass("qBittorrent jelszo (%s): " % args.user)
+            password = getpass.getpass(f"qBittorrent jelszo ({args.user}): ")
         else:
             print("Nincs jelszo (--password vagy QBT_PASSWORD).", file=sys.stderr)
             return 2
@@ -755,26 +943,25 @@ def main(argv=None):
         client.login()
         version = client.version()
         torrents = client.torrents()
-        files_by_hash = {}
+        files_by_hash: dict[str, list[dict[str, Any]]] = {}
         if args.mod == "fa" and args.pontos:
             for torrent in torrents:
                 thash = torrent.get("hash") or ""
                 if thash:
                     files_by_hash[thash] = client.files(thash)
     except QbtError as exc:
-        print("Hiba: %s" % exc, file=sys.stderr)
+        print(f"Hiba: {exc}", file=sys.stderr)
         print("Semmit nem toroltem.", file=sys.stderr)
         return 1
 
-    print("qBittorrent %s (%s) - %d torrent"
-          % (version, client.base, len(torrents)))
-    print("Uzemmod: %s%s"
-          % (args.mod, " (pontos)" if args.pontos and args.mod == "fa" else ""))
+    print(f"qBittorrent {version} ({client.base}) - {len(torrents)} torrent")
+    pontos_jelzo = " (pontos)" if args.pontos and args.mod == "fa" else ""
+    print(f"Uzemmod: {args.mod}{pontos_jelzo}")
     for target in targets:
-        print("Vizsgalt konyvtar: %s" % target)
+        print(f"Vizsgalt konyvtar: {target}")
 
-    def note(target, count):
-        print("A(z) %s alatt talalt torrent-elemek: %d" % (target, count))
+    def note(target: Path, count: int) -> None:
+        print(f"A(z) {target} alatt talalt torrent-elemek: {count}")
 
     try:
         candidates = plan_all(
@@ -784,10 +971,10 @@ def main(argv=None):
             allow_empty=args.allow_empty, on_note=note)
     except SafetyStop as exc:
         print()
-        print("%s Ha tenyleg ezt akarod: --ures-lista-ok" % exc, file=sys.stderr)
+        print(f"{exc} Ha tenyleg ezt akarod: --ures-lista-ok", file=sys.stderr)
         return 2
     except QbtError as exc:
-        print("Hiba: %s" % exc, file=sys.stderr)
+        print(f"Hiba: {exc}", file=sys.stderr)
         print("Semmit nem toroltem.", file=sys.stderr)
         return 1
 
@@ -797,10 +984,10 @@ def main(argv=None):
         print("Nincs felesleges elem - nincs mit tenni.")
         return 0
 
-    print("Felesleges elemek (%d db, %s):" % (len(candidates), human(total)))
+    print(f"Felesleges elemek ({len(candidates)} db, {human(total)}):")
     for cand in candidates:
-        print("  [%s] %10s  %s" % ("D" if cand.is_dir else "F",
-                                   human(cand.size), cand.path))
+        print(f"  [{'D' if cand.is_dir else 'F'}] {human(cand.size):>10}  "
+              f"{cand.path}")
 
     if not args.torol:
         print()
@@ -810,8 +997,8 @@ def main(argv=None):
 
     if args.max_delete and len(candidates) > args.max_delete:
         print()
-        print("Tobb elemet torolne (%d), mint a megadott hatar (%d). Leallok."
-              % (len(candidates), args.max_delete), file=sys.stderr)
+        print(f"Tobb elemet torolne ({len(candidates)}), mint a megadott hatar "
+              f"({args.max_delete}). Leallok.", file=sys.stderr)
         return 2
 
     if not args.igen:
@@ -833,13 +1020,27 @@ def main(argv=None):
             freed += cand.size
         else:
             failed += 1
-        print("  %10s  %s  (%s)" % (human(cand.size), cand.path, message))
+        print(f"  {human(cand.size):>10}  {cand.path}  ({message})")
 
     print()
-    print("Kesz: %d elem, %s felszabadulva.%s"
-          % (len(candidates) - failed, human(freed),
-             ("  %d elem sikertelen!" % failed) if failed else ""))
+    maradt = f"  {failed} elem sikertelen!" if failed else ""
+    print(f"Kesz: {len(candidates) - failed} elem, {human(freed)} "
+          f"felszabadulva.{maradt}")
     return 1 if failed else 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    if sys.version_info < MIN_PYTHON:
+        kell = ".".join(str(x) for x in MIN_PYTHON)
+        print(f"Tul regi Python: {sys.version.split()[0]} (legalabb {kell} kell).",
+              file=sys.stderr)
+        return 2
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:  # pragma: no cover - kezi megszakitas
+        print("\nMegszakitva. A hatralevo elemekhez nem nyultam.",
+              file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

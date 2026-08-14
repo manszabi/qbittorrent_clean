@@ -8,7 +8,7 @@ megadott könyvtárban – például egy Samba megosztáson – megkeresi azokat
 fájlokat és könyvtárakat, **amikhez már nem tartozik torrent**, és törli őket.
 
 - **grafikus felület** és parancssoros használat is,
-- csak `python3` kell hozzá (3.7+), **külső csomag nélkül**,
+- csak `python3` kell hozzá (3.10+), **külső csomag nélkül**,
 - **alapból semmit nem töröl**, csak kiírja, mit törölne,
 - a tényleges törléshez `--torol` kell, és megerősítést kér (`--igen` kihagyja),
 - törlés helyett tud **kukába** is mozgatni (`--kuka`),
@@ -20,7 +20,7 @@ Kattints duplán a **`qbittorrent_clean.bat`** fájlra. Az indítás mindent
 elintéz:
 
 - megkeresi a Pythont (`py` launcher, majd `python`),
-- ellenőrzi a verziót (3.7 vagy újabb kell),
+- ellenőrzi a verziót (3.10 vagy újabb kell),
 - ellenőrzi a szükséges modulokat (`tkinter` és a szabvány könyvtár),
 - ha a `requirements.txt`-ben van külső csomag, **telepíti** (ha a rendszerszintű
   telepítés nem megy, `--user` módban újrapróbálja),
@@ -50,7 +50,9 @@ Fentről lefelé:
 
 A beállítások kilépéskor automatikusan elmentődnek (Windowson az
 `%APPDATA%\qbittorrent_clean\beallitasok.json` fájlba), és induláskor
-visszatöltődnek.
+visszatöltődnek. A mentés előbb ideiglenes fájlba ír, és csak utána cseréli le
+a régit – egy félbeszakadt mentés így nem teszi tönkre a meglévő beállításokat.
+A fájlt (mert jelszó is lehet benne) csak a tulajdonos olvashatja.
 
 A hálózati lekérdezés és a könyvtárak átnézése külön szálon fut, így az ablak
 nem fagy le a nagy megosztásokon sem.
@@ -146,6 +148,8 @@ Gyárilag védett nevek (a NAS és az operációs rendszer mappái):
   veszi.
 - Az **ékezetes neveket** egységesíti (a Samba és a macOS másképp kódolhatja
   ugyanazt a nevet), és alapból a kis/nagybetűt sem nézi.
+- A **kétféle perjelet** (`\` és `/`) ugyanannak veszi, így a `fa` mód akkor is
+  egyezteti az útvonalakat, ha a qBittorrent Windowson fut.
 - **Szimbolikus linkbe nem lép be**, csak magát a linket törli.
 - Hiba esetén (nem elérhető WebUI, rossz jelszó, olvashatatlan könyvtár)
   **nem töröl semmit**.
@@ -165,7 +169,8 @@ python C:\utvonal\qbt_cleanup.py --user admin --min-kor 1 --max-torles 50 ^
 ```
 
 Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden törlés),
-`2` = biztonsági okból leállt.
+`2` = biztonsági okból leállt (rossz kapcsoló is), `130` = megszakítottad
+(Ctrl+C).
 
 ## A repó tartalma
 
@@ -177,14 +182,20 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
+| `pyproject.toml` | A fejlesztői eszközök (ruff) beállítása; a program telepítés nélkül fut. |
 | `tests/` | Tesztkészlet (lásd lent). |
 
 ## Teszt
 
 ```bash
-tests/run_all.sh          # mindkettő
+tests/run_all.sh          # az egész készlet
 python3 tests/qbt_test.py # csak a motor (tkinter nélkül is megy)
+ruff check .              # stílus- és hibaellenőrzés
 ```
+
+Ugyanez fut a GitHubon is minden feltöltésnél
+(`.github/workflows/tesztek.yml`), a 3.10-től a 3.14-ig minden Python
+verzióval.
 
 Hamis qBittorrent WebUI-t indít, valódi ideiglenes könyvtárfát épít, és
 ténylegesen töröltet vele – ellenőrizve, hogy a torrentekhez tartozó fájlok
@@ -194,5 +205,5 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 |-------|-------------|
 | `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
-| `qbt_test.py` | A motor: útvonal-kezelés, a két üzemmód, kuka, biztonsági fékek, valódi törlés. 73 ellenőrzés. |
-| `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése. 54 ellenőrzés. Fejnélküli gépen `xvfb-run` kell hozzá. |
+| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés. |
+| `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése és elrontott beállítás-fájl, háttérszálban keletkező hiba. Fejnélküli gépen `xvfb-run` kell hozzá. |

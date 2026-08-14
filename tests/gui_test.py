@@ -9,14 +9,15 @@ from pathlib import Path
 # A vizsgalt program a repo gyokereben van.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
 import shutil
+import stat
 import tempfile
 import time
 import tkinter as tk
 
 from fake_qbt import PASSWORD, USER, build_tree, start_server
 
-import qbt_cleanup as engine
 import qbt_gui
 
 fail = 0
@@ -25,16 +26,16 @@ fail = 0
 def check(name, got, want):
     global fail
     if got == want:
-        print("ok    %-46s %r" % (name, got))
+        print(f"ok    {name:<46} {got!r}")
     else:
         fail = 1
-        print("HIBA  %-46s kapott=%r  vart=%r" % (name, got, want))
+        print(f"HIBA  {name:<46} kapott={got!r}  vart={want!r}")
 
 
 def check_true(name, cond, info=""):
     check(name, bool(cond), True)
     if not cond and info:
-        print("      %s" % info)
+        print(f"      {info}")
 
 
 # --- a parbeszedablakok helyettesitese, hogy a teszt ne alljon meg -----------
@@ -75,9 +76,9 @@ qbt_gui.beallitas_fajl = lambda: beallitas
 try:
     root = tk.Tk()
 except tk.TclError as exc:  # pragma: no cover - kijelzo nelkuli gep
-    print("Nincs elerheto kijelzo (%s). Hasznald: xvfb-run -a python3 %s"
-          % (exc, sys.argv[0]))
-    raise SystemExit(1)
+    print(f"Nincs elerheto kijelzo ({exc}). "
+          f"Hasznald: xvfb-run -a python3 {sys.argv[0]}")
+    raise SystemExit(1) from exc
 root.withdraw()
 app = qbt_gui.TakaritoApp(root)
 
@@ -198,7 +199,8 @@ app._kuka_valtas()
 app.pipa_valt(app.fa.get_children()[0])  # a Regi.Film.2011 maradjon meg
 parbeszed.igen = True
 app.torles()
-check_true("a torles lefutott", varakozas(lambda: not app.dolgozik and len(app.elemek) < 3))
+check_true("a torles lefutott",
+           varakozas(lambda: not app.dolgozik and len(app.elemek) < 3))
 check("a megmaradt elem a listan van", nevek(), ["Regi.Film.2011"])
 check("a kipipaltak elkerultek",
       (share / "arvalt.mkv").exists() or (rss / "tavalyi.mkv").exists(), False)
@@ -262,8 +264,8 @@ check_true("es utvonal-megfeleltetest javasol",
            parbeszed.hibak and "utvonal-megfeleltetes" in parbeszed.hibak[0],
            parbeszed.hibak)
 
-app.lista_ut.insert("end", "/downloads=%s" % share)
-app.lista_ut.insert("end", "/downloads/rss=%s" % rss)
+app.lista_ut.insert("end", f"/downloads={share}")
+app.lista_ut.insert("end", f"/downloads/rss={rss}")
 app.v_pontos.set(True)
 app.vizsgalat()
 check_true("fa modban helyes utvonallal lefut",
@@ -294,6 +296,49 @@ app.beallitasok_betoltese()
 check("betoltes utan visszaall a cim", app.v_url.get(), URL)
 check("es a konyvtarak is", list(app.lista_kony.get(0, "end")),
       [str(share), str(rss)])
+
+# a fajlban jelszo is lehet, ezert csak a tulajdonos olvashassa
+if os.name != "nt":
+    check("a beallitas-fajlt csak a tulajdonos olvashatja",
+          stat.S_IMODE(beallitas.stat().st_mode), 0o600)
+
+# kezzel elrontott beallitas-fajl: nem szabad elszallni rajta
+elmentett = beallitas.read_text(encoding="utf-8")
+beallitas.write_text('{"konyvtarak": "nem lista", "utvonalak": 5, "mod": 7}',
+                     encoding="utf-8")
+app.beallitasok_betoltese()
+check("elrontott beallitas-fajl: a konyvtarlista ures marad",
+      list(app.lista_kony.get(0, "end")), [])
+check("es az uzemmod ervenyes ertek marad", app.v_mod.get(), "felso")
+beallitas.write_text("ez nem is JSON", encoding="utf-8")
+app.beallitasok_betoltese()
+check("olvashatatlan beallitas-fajlt is elvisel", app.v_mod.get(), "felso")
+beallitas.write_text(elmentett, encoding="utf-8")
+app.beallitasok_betoltese()
+
+# --- varatlan hiba a hatterszalban --------------------------------------------
+#
+# Ha egy hiba kicsuszna a hattermunkabol, az ablak orokre "dolgozik"
+# allapotban ragadna: a gombok tiltva, a halado csik pedig porogne.
+
+regi_plan = qbt_gui.engine.plan_all
+
+
+def robban(*args, **kw):
+    raise ValueError("szandekos proba-hiba")
+
+
+qbt_gui.engine.plan_all = robban
+parbeszed.hibak = []
+app.vizsgalat()
+check_true("varatlan hiba utan is visszakapjuk a vezerlest",
+           varakozas(lambda: not app.dolgozik and parbeszed.hibak),
+           app.v_allapot.get())
+check_true("es lathato a hibauzenet is",
+           parbeszed.hibak and "szandekos proba-hiba" in parbeszed.hibak[0],
+           parbeszed.hibak)
+check("a probagomb ujra hasznalhato", str(app.b_proba["state"]), "normal")
+qbt_gui.engine.plan_all = regi_plan
 
 root.destroy()
 server.shutdown()
