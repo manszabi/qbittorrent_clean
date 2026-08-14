@@ -180,7 +180,7 @@ róla.
 
 - A **félkész** letöltéseket megtartja: a `.!qB` végződésű fájlokat és a
   torrent ideiglenes (`download_path`) könyvtárát is a torrenthez tartozónak
-  veszi.
+  veszi – mindkét üzemmódban.
 - Az **ékezetes neveket** egységesíti (a Samba és a macOS másképp kódolhatja
   ugyanazt a nevet), és alapból a kis/nagybetűt sem nézi.
 - A **kétféle perjelet** (`\` és `/`) ugyanannak veszi, így a `fa` mód akkor is
@@ -190,6 +190,12 @@ róla.
   **nem töröl semmit**.
 - A gyökérkönyvtárat (`/`, `C:\`) nem hajlandó takarítani; a megosztás gyökere
   (`\\gép\megosztás`) viszont rendben van.
+- A **260 karakternél hosszabb** útvonalakat is kezeli Windowson (a hosszú
+  kiadási nevek egy `Subs` almappával könnyen átlépik ezt a határt).
+- Ha egy **alkönyvtárat nem tud beolvasni** (jogosultság, hálózati akadás),
+  azt az ágat kihagyja és szól róla – a takarítás többi része lefut.
+- A grafikus felület **DPI-tudatos**: Windows 11 alatt 125–150%-os nagyítás
+  mellett sem lesz elmosódott.
 
 ## Ütemezett futtatás
 
@@ -214,7 +220,7 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | `qbittorrent_clean.bat` | **Windows-indító**: megkeresi a Pythont, és átadja a vezérlést az `indit.py`-nak. Ezt kattintsd. |
 | `indit.py` | A függőség-ellenőrzés: verzió, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
 | `qbt_gui.py` | A grafikus felület (Tkinter). |
-| `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható. |
+| `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható (a `qbt_naplo.py` legyen mellette). |
 | `qbt_naplo.py` | A törlési napló: sorok írása, heti / méret szerinti rotálás, tömörítés. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
@@ -239,7 +245,7 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 
 | Teszt | Mit vizsgál |
 |-------|-------------|
-| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
+| `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, minden `%VÁLTOZÓ%` létezik, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
 | `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |

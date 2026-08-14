@@ -13,12 +13,16 @@ rem  Ezert nincs benne tobbsoros zarojeles blokk sem: ha a fajl valahogy megis
 rem  LF sorveggel keruline a gepre, a cmd akkor sem tud rajta elcsuszni.
 rem
 rem  Ekezetet sem tartalmaz: a cmd a rendszer kodlapjaval olvas.
+rem
+rem  A Pythont mindig a "py -3" inditoval keressuk eloszor. A "python" nevet
+rem  Windows 10/11 alatt egy Microsoft Store-hivatkozas is elfoglalhatja; a
+rem  -c kapcsoloval indulva az csak hibat ad, a Store-t nem nyitja meg.
 rem ---------------------------------------------------------------------------
 
 cd /d "%~dp0"
 
 echo ============================================================
-echo   qBittorrent takarito   [indito v2]
+echo   qBittorrent takarito   [indito v3]
 echo ============================================================
 echo.
 
@@ -26,6 +30,8 @@ set "PY="
 py -3 -c "import sys" >nul 2>&1 && set "PY=py -3"
 if defined PY goto :python_megvan
 python -c "import sys" >nul 2>&1 && set "PY=python"
+if defined PY goto :python_megvan
+python3 -c "import sys" >nul 2>&1 && set "PY=python3"
 if defined PY goto :python_megvan
 goto :nincs_python
 
@@ -42,6 +48,11 @@ echo.
 echo  Telepitsd innen: https://www.python.org/downloads/
 echo  A telepitonel pipald be az "Add python.exe to PATH" opciot,
 echo  valamint a "tcl/tk and IDLE" komponenst.
+echo.
+echo  Ha szerinted MAR telepitve van, akkor valoszinuleg a Windows sajat
+echo  "python.exe" hivatkozasa all utban. Kapcsold ki itt:
+echo    Gepbeallitasok - Alkalmazasok - Specialis alkalmazasbeallitasok
+echo    - Alkalmazasvegrehajtasi alnevek - python.exe / python3.exe = Ki
 goto :hiba
 
 :nincs_indito

@@ -371,6 +371,16 @@ check_true("es lathato a hibauzenet is",
 check("a probagomb ujra hasznalhato", str(app.b_proba["state"]), "normal")
 qbt_gui.engine.plan_all = regi_plan
 
+# --- kilepes munka kozben ----------------------------------------------------
+
+app.dolgozik = True
+parbeszed.igen = False
+app.kilepes()          # a "nem" valasz nem zarhatja be az ablakot
+check_true("munka kozben rakerdez a kilepesre",
+           "félbemarad" in parbeszed.kerdes, parbeszed.kerdes)
+check_true("es a 'nem' valasz nem zarja be", bool(root.winfo_exists()))
+app.dolgozik = False
+
 root.destroy()
 server.shutdown()
 shutil.rmtree(str(tmp), ignore_errors=True)

@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fnmatch
+import functools
 import getpass
 import http.cookiejar
 import itertools
@@ -93,6 +94,14 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
 
 # A qBittorrent ezt biggyeszti a felkesz fajlok vegere (ha be van kapcsolva).
 INCOMPLETE_SUFFIX = ".!qB"
+
+# Windowson egy utvonal alapbol 260 karakter lehet - egy hosszu kiadasi nev es
+# egy alkonyvtar (Subs, Sample) ezt konnyen atlepi, es akkor a fajl "nem
+# letezik" a program szamara. A "\\?\" eloteg feloldja a korlatot (kb. 32000
+# karakterig). Csak akkor tesszuk ki, ha tenyleg hosszu az ut: az eloteges
+# alakot a rendszer nyersen veszi (nincs / -> \ atirasa, nincs "." es ".."),
+# ezert felesleges kockazat lenne mindenhol hasznalni.
+WINDOWS_UT_HATAR = 240
 
 # A qBittorrent egy torrentjenek leiroja (a WebUI JSON valasza), illetve egy
 # utvonal-megfeleltetes: (a qBittorrent szerinti ut, a helyi ut).
@@ -300,6 +309,24 @@ def normalize_remote(path: str) -> str:
 
 # ------------------------------------------------------------------ konyvtar
 
+def hosszu_ut(path: str | os.PathLike[str]) -> str:
+    r"""A fajlrendszeri hivasokhoz hasznalt alak.
+
+    Windowson a tul hosszu utvonalat \\?\ (halozati megosztasnal \\?\UNC\)
+    eloteggel adjuk at, kulonben a 260 karakteres korlat miatt "nem letezo"
+    fajlt jelentene a rendszer. Mashol valtozatlanul hagyjuk."""
+    szoveg = os.fspath(path)
+    if sys.platform != "win32":
+        return szoveg
+    if len(szoveg) < WINDOWS_UT_HATAR or szoveg.startswith("\\\\?\\"):
+        return szoveg
+    # Az eloteges alak csak abszolut, visszafele dolo perjeles utat fogad el.
+    szoveg = os.path.abspath(szoveg)
+    if szoveg.startswith("\\\\"):  # \\gep\megosztas -> \\?\UNC\gep\megosztas
+        return "\\\\?\\UNC\\" + szoveg[2:]
+    return "\\\\?\\" + szoveg
+
+
 def normalize_target(raw: str | os.PathLike[str]) -> Path:
     """A megadott konyvtar egysegesitese. A UNC utvonalat (\\\\gep\\megosztas)
     nem 'oldjuk fel', mert a resolve() halozati megosztason lassu lehet es
@@ -347,6 +374,23 @@ def parse_map(entry: str) -> PathMap:
     return (remote, str(normalize_target(local)))
 
 
+@functools.lru_cache(maxsize=16)
+def _rendezett_maps(maps: tuple[PathMap, ...]) -> tuple[tuple[str, str, str], ...]:
+    """A megfeleltetesek elokeszitett, sorbarendezett alakja.
+
+    A leghosszabb (legpontosabb) illeszkedes nyer, ezert hossz szerint
+    rendezunk. Ezt - es az egysegesitest - egyszer vegezzuk el, nem minden
+    egyes fajlnal ujra: 'fajlonkent' modban ez tizezerszer futna le.
+    Az eredmeny: (a hasonlitashoz hasznalt eleje, a tiszta tavoli ut, a helyi
+    ut)."""
+    elemek = []
+    for src, dst in sorted(maps, key=lambda m: len(m[0]), reverse=True):
+        tiszta = normalize_remote(src)
+        prefix = tiszta if tiszta.endswith("/") else tiszta + "/"
+        elemek.append((prefix, tiszta, dst))
+    return tuple(elemek)
+
+
 def apply_maps(
     remote_path: str,
     maps: Sequence[PathMap],
@@ -359,12 +403,10 @@ def apply_maps(
         return None
     if not maps:
         return remote
-    # A leghosszabb (legpontosabb) illeszkedes nyer.
-    for src, dst in sorted(maps, key=lambda m: len(m[0]), reverse=True):
-        src_clean = normalize_remote(src)
-        if norm_key(remote, ignore_case) == norm_key(src_clean, ignore_case):
+    remote_kulcs = norm_key(remote, ignore_case)
+    for prefix, tiszta, dst in _rendezett_maps(tuple(maps)):
+        if remote_kulcs == norm_key(tiszta, ignore_case):
             return dst
-        prefix = src_clean if src_clean.endswith("/") else src_clean + "/"
         rest = strip_prefix(remote, prefix, ignore_case)
         if rest:
             return str(Path(dst) / rest)
@@ -387,6 +429,21 @@ def root_name(torrent: Torrent, ignore_case: bool = True) -> str:
     return (torrent.get("name") or "").strip()
 
 
+def kesz_kulcs(kulcs: str, ignore_case: bool = True) -> str:
+    """A felkesz letoltes nevebol a vegleges nev.
+
+    A qBittorrent a meg tolto fajl vegere .!qB-t biggyeszt. A torrent adataiban
+    a VEGLEGES nev szerepel, a lemezen viszont a .!qB-s - ezert a vegzodest az
+    osszehasonlitas elott vagjuk le.
+
+    Szandekosan itt, egyetlen helyen: korabban minden felvetelnel kulon kellett
+    volna felvenni a .!qB-s valtozatot is, es pont az volt a hiba, hogy az
+    egyik agban lemaradt - igy a 'fa' mod letorolte a folyamatban levo
+    letoltest. Raadasul igy fele akkora a halmaz, amit fejben kell tartani."""
+    veg = norm_key(INCOMPLETE_SUFFIX, ignore_case)
+    return kulcs[:-len(veg)] if kulcs.endswith(veg) else kulcs
+
+
 def owned_names(torrents: Iterable[Torrent], ignore_case: bool = True) -> set[str]:
     """A torrentek gyoker-neveinek halmaza (a 'felso' modhoz)."""
     names: set[str] = set()
@@ -394,7 +451,6 @@ def owned_names(torrents: Iterable[Torrent], ignore_case: bool = True) -> set[st
         name = root_name(torrent, ignore_case)
         if name:
             names.add(norm_key(name, ignore_case))
-            names.add(norm_key(name + INCOMPLETE_SUFFIX, ignore_case))
     return names
 
 
@@ -432,6 +488,8 @@ def owned_paths(
             pkey = path_key(parent, ignore_case)
             if not under(pkey, target_key):
                 break  # a vizsgalt konyvtar folott mar nincs mit vedeni
+            if pkey in dirs:
+                break  # ezt (es a folotte levoket) mar felvettuk
             dirs.add(pkey)
             if pkey == target_key or parent == parent.parent:
                 break
@@ -454,7 +512,6 @@ def owned_paths(
                 for base in (save, download):
                     if base:
                         add(base + "/" + rel)
-                        add(base + "/" + rel + INCOMPLETE_SUFFIX)
         else:
             # A tenyleges hely a legpontosabb, de a befejezetlen torrent mas
             # konyvtarban is lehet, ezert minden szoba johetot felveszunk.
@@ -483,31 +540,71 @@ class Candidate:
 
 
 def entry_size(path: str | os.PathLike[str], is_dir: bool) -> int:
-    """Egy fajl vagy egy egesz konyvtar merete bajtban."""
+    """Egy fajl vagy egy egesz konyvtar merete bajtban.
+
+    Szandekosan os.scandir()-rel jarja be a fat, es a bejegyzes sajat
+    stat()-jat kerdezi: Windowson ez a konyvtar beolvasasakor mar megkapott
+    adatbol dolgozik, tehat NEM kell fajlonkent kulon kerdes a kiszolgalotol.
+    Egy Samba megosztason ez konyvtaranként egy fordulo, nem fajlonkent egy -
+    nagy megosztason ez a kulonbseg masodpercekben merheto.
+
+    Olvashatatlan alkonyvtaron nem akad el: azt a reszt kihagyja."""
     if not is_dir:
         try:
-            return os.stat(path, follow_symlinks=False).st_size
+            return os.stat(hosszu_ut(path), follow_symlinks=False).st_size
         except OSError:
             return 0
     total = 0
-    for root, subdirs, files in os.walk(path, onerror=lambda _exc: None):
-        # Szimbolikus linkbe nem megyunk bele.
-        subdirs[:] = [d for d in subdirs
-                      if not os.path.islink(os.path.join(root, d))]
-        for name in files:
-            try:
-                info = os.stat(os.path.join(root, name), follow_symlinks=False)
-            except OSError:
-                continue
-            if not stat.S_ISLNK(info.st_mode):
-                total += info.st_size
+    varolista = [os.fspath(path)]
+    while varolista:
+        aktualis = varolista.pop()
+        try:
+            with os.scandir(hosszu_ut(aktualis)) as bejegyzesek:
+                for entry in bejegyzesek:
+                    try:
+                        if entry.is_symlink():
+                            continue  # szimbolikus linkbe nem megyunk bele
+                        if entry.is_dir(follow_symlinks=False):
+                            varolista.append(
+                                os.path.join(aktualis, entry.name))
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
     return total
 
 
-def is_excluded(name: str, patterns: Iterable[str], ignore_case: bool = True) -> bool:
-    key = norm_key(name, ignore_case)
-    return any(fnmatch.fnmatchcase(key, norm_key(pattern, ignore_case))
-               for pattern in patterns)
+class Kivetelek:
+    """Elore feldolgozott kivetel-mintak.
+
+    A mintakat egyszer hozzuk osszehasonlithato alakra, nem minden egyes
+    fajlnevnel ujra. A mintaillesztes (fnmatch) draga, ezert a csillagot /
+    kerdojelet nem tartalmazo neveket kulon halmazban tartjuk: azoknal eleg
+    egy keresés."""
+
+    __slots__ = ("mintak", "pontos")
+
+    def __init__(self, patterns: Iterable[str] = (), ignore_case: bool = True):
+        self.pontos: set[str] = set()
+        self.mintak: list[str] = []
+        for pattern in patterns:
+            kulcs = norm_key(pattern, ignore_case)
+            if any(jel in kulcs for jel in "*?["):
+                self.mintak.append(kulcs)
+            else:
+                self.pontos.add(kulcs)
+
+    def talal(self, kulcs: str) -> bool:
+        """A `kulcs` mar norm_key() alakban var."""
+        return kulcs in self.pontos or any(
+            fnmatch.fnmatchcase(kulcs, minta) for minta in self.mintak)
+
+
+def is_excluded(name: str, patterns: Iterable[str] = (),
+                ignore_case: bool = True) -> bool:
+    return Kivetelek(patterns, ignore_case).talal(norm_key(name, ignore_case))
 
 
 def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
@@ -515,7 +612,7 @@ def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
     if min_age_days <= 0:
         return False
     try:
-        mtime = os.path.getmtime(path)
+        mtime = os.stat(hosszu_ut(path), follow_symlinks=False).st_mtime
     except OSError:
         return False
     return (time.time() - mtime) < min_age_days * 86400
@@ -523,7 +620,7 @@ def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
 
 def scandir_sorted(path: str | os.PathLike[str]) -> list[os.DirEntry[str]]:
     try:
-        with os.scandir(path) as it:
+        with os.scandir(hosszu_ut(path)) as it:
             return sorted(it, key=lambda e: e.name)
     except OSError as exc:
         raise QbtError(
@@ -540,16 +637,16 @@ def plan_toplevel(
 ) -> list[Candidate]:
     """Csak a legfelso szint, nevek alapjan."""
     out: list[Candidate] = []
-    excludes = tuple(excludes)
+    kivetelek = Kivetelek(excludes, ignore_case)
     protected_keys = {path_key(p, ignore_case) for p in protected}
     for entry in scandir_sorted(target):
         full = Path(target) / entry.name
         if path_key(full, ignore_case) in protected_keys:
             continue
-        if is_excluded(entry.name, excludes, ignore_case):
+        if kivetelek.talal(norm_key(entry.name, ignore_case)):
             continue
-        if norm_key(entry.name, ignore_case) in names:
-            continue
+        if kesz_kulcs(norm_key(entry.name, ignore_case), ignore_case) in names:
+            continue  # a torrente (a felkesz .!qB valtozata is)
         if too_young(full, min_age_days):
             continue
         if entry.is_symlink():
@@ -569,25 +666,40 @@ def plan_tree(
     ignore_case: bool = True,
     min_age_days: float = 0,
     protected: Iterable[str | os.PathLike[str]] = (),
+    on_warn: Callable[[str], None] | None = None,
 ) -> list[Candidate]:
     """Teljes konyvtarfa, utvonalak alapjan.
 
     Szandekosan nem rekurziv: egy melyen agazo megosztason a rekurzio
-    elfogyna (RecursionError), es a takaritas a felenel allna le."""
+    elfogyna (RecursionError), es a takaritas a felenel allna le.
+
+    Egy alkonyvtar olvasasi hibaja (jogosultsag, halozati akadas) nem allitja
+    le az egeszet: azt az agat kihagyjuk - ami ott van, azt nem toroljuk -, es
+    szolunk rola az `on_warn` hivason keresztul. Magat a vizsgalt konyvtarat
+    viszont tudnunk kell olvasni, kulonben nem tudjuk, mi van benne."""
     out: list[Candidate] = []
-    excludes = tuple(excludes)
+    kivetelek = Kivetelek(excludes, ignore_case)
     protected_keys = {path_key(p, ignore_case) for p in protected}
-    varolista = [Path(target)]
+    gyoker = Path(target)
+    varolista = [gyoker]
     while varolista:
         path = varolista.pop()
-        for entry in scandir_sorted(path):
+        try:
+            bejegyzesek = scandir_sorted(path)
+        except QbtError as exc:
+            if path == gyoker:
+                raise
+            if on_warn:
+                on_warn(str(exc))
+            continue
+        for entry in bejegyzesek:
             full = path / entry.name
             key = path_key(full, ignore_case)
             if key in protected_keys:
                 continue
-            if is_excluded(entry.name, excludes, ignore_case):
+            if kivetelek.talal(norm_key(entry.name, ignore_case)):
                 continue
-            if key in roots:
+            if kesz_kulcs(key, ignore_case) in roots:
                 continue  # a torrente: se o, se ami alatta van
             if entry.is_symlink():
                 if key not in dirs:
@@ -618,6 +730,7 @@ def plan_all(
     extra_protected: Iterable[str | os.PathLike[str]] = (),
     allow_empty: bool = False,
     on_note: Callable[[Path, int], None] | None = None,
+    on_warn: Callable[[str], None] | None = None,
 ) -> list[Candidate]:
     """A teljes terv: mely elemekhez nem tartozik mar torrent.
 
@@ -651,7 +764,7 @@ def plan_all(
                     "Valoszinuleg utvonal-megfeleltetes kell (TAVOLI=HELYI). "
                     "Igy MINDENT torolne, ezert leallok.")
             candidates += plan_tree(target, roots, dirs, excludes, ignore_case,
-                                    min_age_days, protected)
+                                    min_age_days, protected, on_warn)
     return candidates
 
 
@@ -674,14 +787,14 @@ def force_remove(func: Callable[[Any], Any], path: Any, _exc: object = None) -> 
     A meglevo jogokhoz HOZZAADUNK, nem felulirjuk oket: egy konyvtarnak a
     belepesi (x) jog is kell, e nelkul a masodik probalkozas is elszallna."""
     try:
-        mode = os.stat(path, follow_symlinks=False).st_mode
+        mode = os.stat(hosszu_ut(path), follow_symlinks=False).st_mode
     except OSError:
         mode = 0
     extra = stat.S_IWRITE | stat.S_IREAD
     if stat.S_ISDIR(mode):
         extra |= stat.S_IEXEC
     with contextlib.suppress(OSError):
-        os.chmod(path, stat.S_IMODE(mode) | extra)
+        os.chmod(hosszu_ut(path), stat.S_IMODE(mode) | extra)
     # Az shutil a konyvtar beolvasasanak hibajara is minket hiv: olyankor a
     # visszakapott iteratort le kell zarni, kulonben nyitva marad a leiro.
     result = func(path)
@@ -693,16 +806,16 @@ def force_remove(func: Callable[[Any], Any], path: Any, _exc: object = None) -> 
 def rmtree(path: str | os.PathLike[str]) -> None:
     """Konyvtar torlese az irasvedett fajlok kezelesevel egyutt."""
     if sys.version_info >= (3, 12):
-        shutil.rmtree(path, onexc=force_remove)
+        shutil.rmtree(hosszu_ut(path), onexc=force_remove)
     else:  # pragma: no cover - csak a regebbi Pythonokon fut
-        shutil.rmtree(path, onerror=force_remove)
+        shutil.rmtree(hosszu_ut(path), onerror=force_remove)
 
 
 def remove_file(path: str | os.PathLike[str]) -> None:
     try:
-        os.remove(path)
+        os.remove(hosszu_ut(path))
     except PermissionError:
-        force_remove(os.remove, path)
+        force_remove(os.remove, hosszu_ut(path))
 
 
 def owner_target(
@@ -720,16 +833,21 @@ def owner_target(
     return next((t for t in owners if t in parents), owners[0])
 
 
+def _letezik(path: str | os.PathLike[str]) -> bool:
+    """Van-e mar ilyen nevu elem (a torott szimbolikus linket is beleertve)."""
+    return os.path.lexists(hosszu_ut(path))
+
+
 def _free_trash_path(dest: Path) -> Path:
     """Szabad nev a kukaban. Az idobelyeg mellett sorszam is kell: egy
     masodpercen belul tobb azonos nevu elem is erkezhet."""
-    if not dest.exists() and not dest.is_symlink():
+    if not _letezik(dest):
         return dest
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for counter in itertools.count():
         suffix = f".{stamp}" if not counter else f".{stamp}-{counter}"
         candidate = dest.with_name(dest.name + suffix)
-        if not candidate.exists() and not candidate.is_symlink():
+        if not _letezik(candidate):
             return candidate
     raise AssertionError  # pragma: no cover - a ciklus vegtelen
 
@@ -748,8 +866,8 @@ def remove_entry(
             except ValueError:
                 rel = Path(path.name)
             dest = _free_trash_path(Path(trash_dir) / rel)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(dest))
+            os.makedirs(hosszu_ut(dest.parent), exist_ok=True)
+            shutil.move(hosszu_ut(path), hosszu_ut(dest))
             return True, f"kukaba: {dest}"
         if path.is_symlink() or not candidate.is_dir:
             remove_file(path)
@@ -980,12 +1098,14 @@ def _main(argv: Sequence[str] | None) -> int:
     def note(target: Path, count: int) -> None:
         print(f"A(z) {target} alatt talalt torrent-elemek: {count}")
 
+    gondok: list[str] = []
+
     try:
         candidates = plan_all(
             torrents, files_by_hash, targets, args.mod, maps, excludes,
             ignore_case, args.min_age,
             extra_protected=[trash_dir] if trash_dir else (),
-            allow_empty=args.allow_empty, on_note=note)
+            allow_empty=args.allow_empty, on_note=note, on_warn=gondok.append)
     except SafetyStop as exc:
         print()
         print(f"{exc} Ha tenyleg ezt akarod: --ures-lista-ok", file=sys.stderr)
@@ -994,6 +1114,15 @@ def _main(argv: Sequence[str] | None) -> int:
         print(f"Hiba: {exc}", file=sys.stderr)
         print("Semmit nem toroltem.", file=sys.stderr)
         return 1
+
+    if gondok:
+        print()
+        print(f"Figyelem: {len(gondok)} konyvtarat nem tudtam beolvasni - "
+              "ezekben nem takaritottam:", file=sys.stderr)
+        for gond in gondok[:10]:
+            print(f"  {gond}", file=sys.stderr)
+        if len(gondok) > 10:
+            print(f"  ... es meg {len(gondok) - 10}.", file=sys.stderr)
 
     total = sum(c.size for c in candidates)
     print()
