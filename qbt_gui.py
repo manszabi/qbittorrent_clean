@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -29,6 +30,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import qbt_cleanup as engine
+import qbt_naplo
 
 CIM = "qBittorrent takarító"
 
@@ -185,11 +187,23 @@ class TakaritoApp:
                                  command=self.kuka_tallozas)
         self.b_kuka.grid(row=5, column=3, sticky="w", pady=(4, 0))
 
+        self.v_naplo_be = tk.BooleanVar(value=True)
+        ttk.Checkbutton(beall, text="Törlési napló:",
+                        variable=self.v_naplo_be).grid(
+            row=6, column=0, sticky="w", pady=(4, 0))
+        self.v_naplo = tk.StringVar(value=str(qbt_naplo.alap_naplo_fajl()))
+        ttk.Entry(beall, textvariable=self.v_naplo, width=40,
+                  state="readonly").grid(
+            row=6, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        ttk.Button(beall, text="Megnyit", width=8,
+                   command=self.naplo_megnyitas).grid(
+            row=6, column=3, sticky="w", pady=(4, 0))
+
         # útvonal-megfeleltetés (csak a "fa" módhoz)
         self.ut_keret = ttk.LabelFrame(
             beall, text="Útvonal-megfeleltetés (qBittorrent útvonala = helyi "
                         "útvonal)", padding=6)
-        self.ut_keret.grid(row=0, column=5, rowspan=6, sticky="nsew", padx=(12, 0))
+        self.ut_keret.grid(row=0, column=5, rowspan=7, sticky="nsew", padx=(12, 0))
         self.ut_keret.columnconfigure(0, weight=1)
         self.lista_ut = tk.Listbox(self.ut_keret, height=5, exportselection=False)
         self.lista_ut.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -299,6 +313,20 @@ class TakaritoApp:
         if ut:
             self.v_kuka.set(str(engine.normalize_target(ut)))
 
+    def naplo_megnyitas(self) -> None:
+        """A naplót tartalmazó mappa megnyitása a rendszer fájlkezelőjében."""
+        mappa = Path(self.v_naplo.get()).parent
+        try:
+            mappa.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(mappa)  # csak Windowson létezik
+            else:
+                subprocess.Popen(
+                    ["open" if sys.platform == "darwin" else "xdg-open",
+                     str(mappa)])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror(CIM, f"Nem tudom megnyitni:\n{mappa}\n\n{exc}")
+
     def utvonal_hozzaad(self) -> None:
         tavoli = simpledialog.askstring(
             CIM, "A qBittorrent szerinti útvonal (pl. /downloads):",
@@ -336,6 +364,7 @@ class TakaritoApp:
             "min_kor": self.v_min_kor.get(),
             "kuka_be": self.v_kuka_be.get(),
             "kuka": self.v_kuka.get(),
+            "naplo_be": self.v_naplo_be.get(),
             "utvonalak": list(self.lista_ut.get(0, "end")),
         }
         fajl = beallitas_fajl()
@@ -380,6 +409,7 @@ class TakaritoApp:
         self.v_min_kor.set(str(adat.get("min_kor", "0")))
         self.v_kuka_be.set(bool(adat.get("kuka_be")))
         self.v_kuka.set(str(adat.get("kuka", "")))
+        self.v_naplo_be.set(bool(adat.get("naplo_be", True)))
         self.lista_ut.delete(0, "end")
         for sor in _szoveglista(adat.get("utvonalak")):
             self.lista_ut.insert("end", sor)
@@ -463,6 +493,7 @@ class TakaritoApp:
             "kivetelek": kivetelek + list(engine.DEFAULT_EXCLUDES),
             "min_kor": min_kor,
             "kuka": kuka,
+            "naplo": Path(self.v_naplo.get()) if self.v_naplo_be.get() else None,
         }
 
     def _munka_indul(self, szoveg: str) -> None:
@@ -616,7 +647,7 @@ class TakaritoApp:
         konyvtarak = self.vizsgalt_konyvtarak or beall["konyvtarak"]
         self._munka_indul("Törlés…")
         self._hatterben(lambda: self._torles_szal(
-            indexek, valasztott, konyvtarak, beall["kuka"]))
+            indexek, valasztott, konyvtarak, beall["kuka"], beall["naplo"]))
 
     def _torles_szal(
         self,
@@ -624,18 +655,26 @@ class TakaritoApp:
         elemek: Sequence[engine.Candidate],
         konyvtarak: Sequence[Path],
         kuka: Path | None,
+        naplo_ut: Path | None = None,
     ) -> tuple[Any, ...]:
         kesz: set[int] = set()
         hibak: list[tuple[engine.Candidate, str]] = []
         felszabadult = 0
-        for index, elem in zip(indexek, elemek, strict=True):
-            gazda = engine.owner_target(elem.path, konyvtarak)
-            siker, uzenet = engine.remove_entry(elem, gazda, kuka)
-            if siker:
-                kesz.add(index)
-                felszabadult += elem.size
-            else:
-                hibak.append((elem, uzenet))
+        naplo = qbt_naplo.nyitas(naplo_ut) if naplo_ut else None
+        try:
+            for index, elem in zip(indexek, elemek, strict=True):
+                gazda = engine.owner_target(elem.path, konyvtarak)
+                siker, uzenet = engine.remove_entry(elem, gazda, kuka)
+                if siker:
+                    kesz.add(index)
+                    felszabadult += elem.size
+                else:
+                    hibak.append((elem, uzenet))
+                if naplo:
+                    naplo.rogzit(elem, siker, uzenet, kukaba=bool(kuka))
+        finally:
+            if naplo:
+                naplo.close()
         return ("torles", kesz, hibak, felszabadult)
 
     # ----------------------------------------------------- üzenetek kezelése

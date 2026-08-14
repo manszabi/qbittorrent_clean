@@ -403,6 +403,35 @@ check("main: fa+pontos mod a torrent fajljait meghagyta",
       (share / "Film.Egy.2024" / "film.mkv").exists()
       and (share / "Film.Egy.2024" / "film.srt").exists(), True)
 
+# torlesi naplo: a valodi torlesrol keszuljon bejegyzes
+naplo_fajl = tmp / "naplo" / "torlesek.log"
+(share / "naplozando.mkv").write_bytes(b"n" * 24)
+code, out = run_main(base + ["--torol", "--igen", "--kivetel", ".kuka",
+                             "--naplo", str(naplo_fajl)])
+naplo_sorok = naplo_fajl.read_text(encoding="utf-8").splitlines()
+check("main: a naplo elkeszult", naplo_fajl.is_file(), True)
+check_true("main: kiirja a naplo helyet", str(naplo_fajl) in out, out)
+naplozott = [s.split("\t") for s in naplo_sorok[1:]]
+check("main: a torolt fajl bekerult a naploba",
+      [(m[1], m[5]) for m in naplozott], [("torolve", "naplozando.mkv")])
+check("main: a konyvtar oszlop a fajl helye", naplozott[0][4], str(share))
+check("main: a meret is megvan", naplozott[0][3], "24")
+
+# --nincs-naplo eseten ne keszuljon semmi
+(share / "naplo.nelkul.mkv").write_bytes(b"n" * 8)
+elozo_meret = naplo_fajl.stat().st_size
+code, out = run_main(base + ["--torol", "--igen", "--kivetel", ".kuka",
+                             "--naplo", str(naplo_fajl), "--nincs-naplo"])
+check("main: --nincs-naplo eseten nem ir a naploba",
+      naplo_fajl.stat().st_size, elozo_meret)
+check("main: de a torles megtortent", (share / "naplo.nelkul.mkv").exists(),
+      False)
+
+# proba futas (nem torol) ne hozzon letre naplot
+proba_naplo = tmp / "proba-naplo" / "torlesek.log"
+run_main(base + ["--kivetel", ".kuka", "--naplo", str(proba_naplo)])
+check("main: a proba futas nem nyit naplot", proba_naplo.exists(), False)
+
 # irasvedett fajl (Samban eloszeretettel fordul elo) + ugyanaz a konyvtar
 # ketszer megadva
 ro = share / "irasvedett.mkv"

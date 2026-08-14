@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import qbt_naplo
+
 API = "/api/v2"
 
 # Ennel regebbi Pythonon a program nem indul el (a regebbi kiadasok mar nem
@@ -827,6 +829,21 @@ def build_parser() -> argparse.ArgumentParser:
                         default=0, metavar="DB",
                         help="ha ennel tobb elemet torolne, inkabb alljon le "
                              "(alap: 0 = nincs korlat)")
+    parser.add_argument("--naplo", default=None, metavar="FAJL",
+                        help=f"a torlesi naplo helye "
+                             f"(alap: {qbt_naplo.alap_naplo_fajl()})")
+    parser.add_argument("--nincs-naplo", dest="no_naplo", action="store_true",
+                        help="ne vezessen torlesi naplot")
+    parser.add_argument("--naplo-meret", dest="naplo_meret", type=pozitiv_szam,
+                        default=qbt_naplo.ALAP_MERET / (1024 * 1024),
+                        metavar="MB",
+                        help="ekkora naplofajl utan kezdjen ujat "
+                             "(alap: %(default)s MB; hetfonkent ugyis ujat kezd)")
+    parser.add_argument("--naplo-tartas", dest="naplo_tartas",
+                        type=nemnegativ_egesz, default=qbt_naplo.ALAP_TARTAS,
+                        metavar="DB",
+                        help="ennyi lezart (tomoritett) naplofajlt tartson meg "
+                             "(alap: %(default)s)")
     parser.add_argument("--torol", action="store_true",
                         help="tenylegesen toroljon (enelkul csak kiir)")
     parser.add_argument("--igen", action="store_true",
@@ -1010,22 +1027,36 @@ def _main(argv: Sequence[str] | None) -> int:
             print("Megsem toroltem semmit.")
             return 0
 
+    naplo = None
+    if not args.no_naplo:
+        naplo = qbt_naplo.nyitas(args.naplo,
+                                 int(args.naplo_meret * 1024 * 1024),
+                                 args.naplo_tartas)
+
     print()
     freed = 0
     failed = 0
-    for cand in candidates:
-        ok, message = remove_entry(cand, owner_target(cand.path, targets),
-                                   trash_dir)
-        if ok:
-            freed += cand.size
-        else:
-            failed += 1
-        print(f"  {human(cand.size):>10}  {cand.path}  ({message})")
+    try:
+        for cand in candidates:
+            ok, message = remove_entry(cand, owner_target(cand.path, targets),
+                                       trash_dir)
+            if ok:
+                freed += cand.size
+            else:
+                failed += 1
+            if naplo:
+                naplo.rogzit(cand, ok, message, kukaba=bool(trash_dir))
+            print(f"  {human(cand.size):>10}  {cand.path}  ({message})")
+    finally:
+        if naplo:
+            naplo.close()
 
     print()
     maradt = f"  {failed} elem sikertelen!" if failed else ""
     print(f"Kesz: {len(candidates) - failed} elem, {human(freed)} "
           f"felszabadulva.{maradt}")
+    if naplo:
+        print(f"A torlesek naploja: {naplo.path}")
     return 1 if failed else 0
 
 

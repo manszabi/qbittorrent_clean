@@ -82,6 +82,10 @@ except tk.TclError as exc:  # pragma: no cover - kijelzo nelkuli gep
 root.withdraw()
 app = qbt_gui.TakaritoApp(root)
 
+# a naplo se a valodi helyere keruljon
+qbt_naplo_ut = tmp / "naplo" / "torlesek.log"
+app.v_naplo.set(str(qbt_naplo_ut))
+
 
 def varakozas(mire, masodperc=20):
     """A hattermunka bevarasa: kozben az ablakot is porgetjuk, mert az
@@ -215,6 +219,16 @@ check("torles utan a megmaradt sor nincs bepipalva",
       [sor[0] for sor in sorok()], ["☐"])
 check("igy a torles gomb is tiltott", str(app.b_torles["state"]), "disabled")
 
+# --- torlesi naplo ----------------------------------------------------------
+
+naplo_sorok = qbt_naplo_ut.read_text(encoding="utf-8").splitlines()
+check_true("a felulet is naploz", len(naplo_sorok) > 1, naplo_sorok)
+naplozott = sorted(s.split("\t")[5] for s in naplo_sorok[1:])
+check("a kukaba mozgatott elemek bekerultek", naplozott,
+      ["arvalt.mkv", "tavalyi.mkv"])
+check("a muvelet 'kukaba'",
+      sorted({s.split("\t")[1] for s in naplo_sorok[1:]}), ["kukaba"])
+
 # --- vegleges torles, es a "megsem" valasz ----------------------------------
 
 app.v_kuka_be.set(False)
@@ -233,6 +247,23 @@ check_true("vegleges torles lefutott",
            varakozas(lambda: not app.dolgozik and not app.elemek))
 check("a konyvtar eltunt", (share / "Regi.Film.2011").exists(), False)
 check("nincs tobb sor a listaban", sorok(), [])
+naplo_sorok = qbt_naplo_ut.read_text(encoding="utf-8").splitlines()
+check("a vegleges torles is naploba kerult",
+      [s.split("\t")[1] for s in naplo_sorok[1:] if "Regi.Film" in s], ["torolve"])
+check("egyetlen fejleccel", naplo_sorok.count(naplo_sorok[0]), 1)
+
+# kikapcsolva ne naplozzon
+app.v_naplo_be.set(False)
+elozo = qbt_naplo_ut.stat().st_size
+(share / "meg.egy.mkv").write_bytes(b"m" * 12)
+app.vizsgalat()
+varakozas(lambda: not app.dolgozik and app.elemek)
+parbeszed.igen = True
+app.torles()
+varakozas(lambda: not app.dolgozik and not app.elemek)
+check("kikapcsolt naplonal nem ir", qbt_naplo_ut.stat().st_size, elozo)
+check("de a torles megtortent", (share / "meg.egy.mkv").exists(), False)
+app.v_naplo_be.set(True)
 
 # --- ures vizsgalat es a biztonsagi fek -------------------------------------
 
