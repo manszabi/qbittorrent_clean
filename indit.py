@@ -6,8 +6,9 @@ hogy megkeresi a Pythont, es atadja a vezerlest ennek a fajlnak. Minden
 ellenorzes itt van, mert a Python kodot lehet tesztelni - a cmd.exe-t nem.
 
 Ez a fajl szandekosan regi Python nyelvtannal keszult (nincs f-string, nincs
-tipus-annotacio), hogy egy tul regi Python is el tudja indítani, es ertheto
-uzenetet tudjon adni a verziorol.
+tipus-annotacio), hogy egy tul regi Python is le tudja forditani, es ertheto
+uzenetet tudjon adni a verziorol - a tobbi fajl mar a mai nyelvtant hasznalja,
+azokat egy regi Python el sem tudna olvasni.
 
 Kimenete szandekosan ekezet nelkuli: a Windows parancssor a rendszer
 kodlapjaval ir, es az ekezetes betuk ott konnyen szemette valnak.
@@ -17,10 +18,11 @@ import os
 import subprocess
 import sys
 
-MIN_VERZIO = (3, 7)
+MIN_VERZIO = (3, 10)
 
 # A program ezeket hasznalja a Python szabvany konyvtarabol.
-ALAP_MODULOK = ["json", "ssl", "shutil", "urllib.request", "http.cookiejar"]
+ALAP_MODULOK = ["json", "ssl", "shutil", "urllib.request", "http.cookiejar",
+                "unicodedata", "dataclasses", "argparse"]
 
 ITT = os.path.dirname(os.path.abspath(__file__))
 
@@ -52,15 +54,15 @@ def hianyzo_modulok(modulok=None):
 
 
 def csomag_sorok(utvonal):
-    """A requirements.txt valodi csomag-sorai (a megjegyzesek nelkul)."""
+    """A requirements.txt valodi csomag-sorai (a megjegyzesek nelkul).
+
+    A kodolast kotelezo megadni: e nelkul a rendszer kodlapja dontene, es a
+    fajl egy ekezetes megjegyzestol elszallna."""
     try:
-        fh = open(utvonal, "r")
-    except IOError:
+        with open(utvonal, encoding="utf-8") as fh:
+            sorok = fh.read().splitlines()
+    except (OSError, ValueError):
         return []
-    try:
-        sorok = fh.read().splitlines()
-    finally:
-        fh.close()
     return [s.strip() for s in sorok if s.strip() and not s.strip().startswith("#")]
 
 
@@ -70,7 +72,8 @@ def csomagok_telepitese(utvonal):
         print("[OK]   Kulso csomag nem szukseges.")
         return True
     print("[..]   Kulso csomagok telepitese...")
-    alap = [sys.executable, "-m", "pip", "install", "-r", utvonal]
+    alap = [sys.executable, "-m", "pip", "install",
+            "--disable-pip-version-check", "-r", utvonal]
     if _futtat(alap):
         print("[OK]   Csomagok rendben.")
         return True

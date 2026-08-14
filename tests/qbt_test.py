@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import io
 import os
 import shutil
+import stat
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -23,16 +24,16 @@ fail = 0
 def check(name, got, want):
     global fail
     if got == want:
-        print("ok    %-46s %r" % (name, got))
+        print(f"ok    {name:<46} {got!r}")
     else:
         fail = 1
-        print("HIBA  %-46s kapott=%r  vart=%r" % (name, got, want))
+        print(f"HIBA  {name:<46} kapott={got!r}  vart={want!r}")
 
 
 def check_true(name, cond, info=""):
     check(name, bool(cond), True)
     if not cond and info:
-        print("      %s" % info)
+        print(f"      {info}")
 
 
 URL, server = start_server()
@@ -87,6 +88,50 @@ check("is_excluded mintaval", q.is_excluded(".Trash-1000", q.DEFAULT_EXCLUDES), 
 check("is_excluded rendes nev", q.is_excluded("Film.Egy.2024", q.DEFAULT_EXCLUDES),
       False)
 
+# --------------------------------------------- ketfele ekezet-kodolas (NFC/NFD)
+#
+# A Samba / macOS ugyanazt az ekezetes nevet ketfelekeppen is tarolhatja. A
+# nevek OSSZEHASONLITASA emiatt normalizalt alakon tortenik, a LEVAGAS viszont
+# hosszal dolgozik - ha a ketto elcsuszik, a program a torrenthez tartozo
+# konyvtarat is feleslegesnek latja, es letorli. Ezert kulon ellenorizzuk.
+
+nfd_save = unicodedata.normalize("NFD", "/le toltes/Videó")
+nfc_save = unicodedata.normalize("NFC", "/le toltes/Videó")
+check("root_name: NFD mentesi ut, NFC tartalom",
+      q.root_name({"name": "x", "save_path": nfd_save,
+                   "content_path": nfc_save + "/Film.2024"}), "Film.2024")
+check("root_name: NFC mentesi ut, NFD tartalom",
+      q.root_name({"name": "x", "save_path": nfc_save,
+                   "content_path": nfd_save + "/Film.2024"}), "Film.2024")
+check("apply_maps: ketfele ekezet-kodolas is egyezik",
+      q.apply_maps(nfd_save + "/Film.2024/a.mkv", [q.parse_map(nfc_save + "=/mnt/s")]),
+      str(Path("/mnt/s/Film.2024/a.mkv")))
+check("strip_prefix: nem illeszkedo eleje", q.strip_prefix("/a/b", "/c/"), None)
+check("strip_prefix: kis-nagybetu szamit, ha kerjuk",
+      q.strip_prefix("/A/b", "/a/", ignore_case=False), None)
+
+check("apply_maps: --kis-nagy-betu eseten a megfeleltetes is figyel ra",
+      q.apply_maps("/DOWNLOADS/x", [q.parse_map("/Downloads=/mnt/s")],
+                   ignore_case=False), None)
+check("apply_maps: alapbol viszont nem szamit",
+      q.apply_maps("/DOWNLOADS/x", [q.parse_map("/Downloads=/mnt/s")]),
+      str(Path("/mnt/s/x")))
+
+# --------------------------------------------------- perjelek egysegesitese
+#
+# A Windows visszafele dolo perjelet hasznal, a qBittorrent elore dolot. Ha a
+# ketto keveredne, a 'fa' mod egyetlen torrent-elemet sem talalna meg.
+
+check("path_key: a ketfele perjel ugyanaz",
+      q.path_key("D:\\letoltes\\Film\\"), q.path_key("d:/letoltes/film"))
+check("normalize_remote: a dupla perjelet osszevonja",
+      q.normalize_remote("//gep//megosztas//a/"), "//gep/megosztas/a")
+win_torrent = [{"hash": "w", "name": "Film", "save_path": "D:\\letoltes",
+                "download_path": "", "content_path": "D:\\letoltes\\Film"}]
+win_roots, _ = q.owned_paths(win_torrent, {}, [], "D:\\letoltes")
+check("owned_paths: Windows-utvonal megfeleltetes nelkul is egyezik",
+      sorted(win_roots), ["d:/letoltes/film"])
+
 # --------------------------------------------------------- WebUI kliens
 
 bad = q.QbtClient(URL, USER, "rossz jelszo", timeout=5)
@@ -126,9 +171,9 @@ cands = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES, protected=[rss])
 check("felso mod: mit torolne (downloads)", names_of(cands, share),
       ["Regi.Film.2011", "arvalt.mkv"])
 check("felso mod: az rss alkonyvtar vedve van",
-      any("rss" == Path(c.path).name for c in cands), False)
+      any(Path(c.path).name == "rss" for c in cands), False)
 check("felso mod: @eaDir vedve van",
-      any("@eaDir" == Path(c.path).name for c in cands), False)
+      any(Path(c.path).name == "@eaDir" for c in cands), False)
 check("felso mod: a Regi.Film.2011 merete",
       [c.size for c in cands if Path(c.path).name == "Regi.Film.2011"], [4096])
 
@@ -168,6 +213,59 @@ check("rossz megfeleltetes -> ures halmaz", len(roots), 0)
 cands = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES, min_age_days=1,
                         protected=[rss])
 check("min-kor 1 nap: a friss elemeket meghagyja", names_of(cands, share), [])
+
+# --- melyen agazo fa: a bejaras nem lehet rekurziv (RecursionError)
+#
+# A rekurzios korlatot ideiglenesen lejjebb vesszuk, kulonben a probahoz olyan
+# melyen kellene konyvtarat gyartani, amit a fajlrendszer mar nem is birna
+# (a teljes utvonal hossza korlatos).
+
+
+def verem_melyseg():
+    melyseg, keret = 0, sys._getframe()
+    while keret is not None:
+        melyseg += 1
+        keret = keret.f_back
+    return melyseg
+
+
+melyfa = Path(tmp) / "melyfa"
+kurzor = melyfa
+for i in range(250):
+    kurzor = kurzor / f"m{i:03d}"
+kurzor.mkdir(parents=True)
+(kurzor / "legalul.mkv").write_bytes(b"m" * 8)
+melyfa_dirs = {q.path_key(p) for p in [kurzor, *kurzor.parents]}
+regi_korlat = sys.getrecursionlimit()
+sys.setrecursionlimit(verem_melyseg() + 120)  # keveseb, mint a fa melysege
+try:
+    melyfa_cands = q.plan_tree(melyfa, set(), melyfa_dirs)
+    check("melyen agazo fat is bejar (nem rekurziv)",
+          [Path(c.path).name for c in melyfa_cands], ["legalul.mkv"])
+except RecursionError:
+    check("melyen agazo fat is bejar (nem rekurziv)", "RecursionError",
+          "nincs hiba")
+finally:
+    sys.setrecursionlimit(regi_korlat)
+shutil.rmtree(str(melyfa))
+
+# --- force_remove: a konyvtarbol nem veheti el a belepesi (x) jogot, kulonben
+#     a masodik torlesi probalkozas is elszallna
+zart = Path(tmp) / "zart"
+zart.mkdir()
+(zart / "benne.txt").write_bytes(b"x")
+os.chmod(str(zart), 0o500)
+q.force_remove(lambda _p: None, str(zart))
+check("force_remove: a konyvtar bejarhato marad",
+      bool(stat.S_IMODE(os.stat(str(zart)).st_mode) & stat.S_IXUSR), True)
+check("force_remove: es irhato is lett",
+      bool(stat.S_IMODE(os.stat(str(zart)).st_mode) & stat.S_IWUSR), True)
+shutil.rmtree(str(zart))
+
+check("owner_target: ures konyvtarlista sem szall el",
+      q.owner_target(Path("/a/b/c.mkv"), []), Path("/a/b"))
+check("owner_target: a legkulso konyvtart valasztja",
+      q.owner_target(Path("/a/b/c.mkv"), [Path("/a/b"), Path("/a")]), Path("/a"))
 
 shutil.rmtree(str(tmp))
 
@@ -256,6 +354,36 @@ check("main: elerhetetlen WebUI-nal nem torol", (share / "szemet.mkv").exists(),
 code, out = run_main(["--url", URL, "--user", USER, "--password", PASSWORD,
                       "--konyvtar", str(tmp / "nincs-ilyen")])
 check("main: nem letezo konyvtar -> 2", code, 2)
+
+# ertelmetlen szamok: az argparse alljon le (2-es kod), ne "sikeres" futas
+for rossz in (["--min-kor", "-1"], ["--idokorlat", "0"], ["--max-torles", "-5"]):
+    try:
+        code, out = run_main(base + rossz)
+    except SystemExit as exc:  # argparse igy jelez
+        code = exc.code
+    check(f"main: {' '.join(rossz)} visszautasitva", code, 2)
+
+# a 'fa' mod kapcsoloi 'felso' modban nem csendben vesznek el
+code, out = run_main(base + ["--pontos"])
+check_true("main: szol, ha a --pontos nem szamit", "--pontos csak a 'fa'" in out,
+           out)
+
+# kuka: ket azonos nevu elem kulonbozo helyrol - a masodik nem irhatja felul az
+# elsot (egy masodpercen belul is)
+kuka2 = Path(tmp) / "kuka2"
+kuka2.mkdir()
+forras = Path(tmp) / "forras"
+(forras / "alatta").mkdir(parents=True)
+(forras / "x.mkv").write_bytes(b"1")
+(forras / "alatta" / "x.mkv").write_bytes(b"22")
+ok1, _ = q.remove_entry(q.Candidate(forras / "x.mkv", False, 1), forras, kuka2)
+ok2, _ = q.remove_entry(q.Candidate(forras / "alatta" / "x.mkv", False, 2),
+                        forras / "alatta", kuka2)
+check("kuka: mindket athelyezes sikerult", (ok1, ok2), (True, True))
+check("kuka: az azonos nevu elem nem irta felul az elsot",
+      sorted(p.stat().st_size for p in kuka2.iterdir()), [1, 2])
+shutil.rmtree(str(forras))
+shutil.rmtree(str(kuka2))
 
 # 'fa' mod megfeleltetes nelkul: nem talal torrent-elemet, ezert leall
 code, out = run_main(base + ["--mod", "fa", "--torol", "--igen"])

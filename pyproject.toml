@@ -1,0 +1,44 @@
+# A program telepites nelkul is fut (nincs kulso fuggosege), ez a fajl a
+# fejlesztoi eszkozok - elsosorban a ruff - kozos beallitasa.
+
+[project]
+name = "qbittorrent-clean"
+version = "2.0.0"
+description = "A qBittorrentben mar nem szereplo fajlok kilistazasa es torlese"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade - a mai nyelvtan
+    "B",    # bugbear
+    "SIM",  # egyszerusitesek
+    "C4",   # comprehension-ok
+    "BLE",  # blind except
+    "RUF",
+]
+ignore = [
+    # A kimenet magyar: az ekezetek es a gondolatjel szandekosak.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Az indito szandekosan regi nyelvtannal keszult, hogy egy tul regi Python is
+# le tudja forditani, es ertheto uzenetet tudjon adni a verziorol. Ezert nem
+# hasznal f-stringet.
+"indit.py" = ["UP031", "UP032", "RUF005"]
+# A tesztek egyetlen szkriptkent futnak, felulrol lefele; ott az import nem
+# csak a fajl elejen all, es a modulszintu allapot is szandekos.
+"tests/*" = ["E402", "RUF005"]
