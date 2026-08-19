@@ -56,7 +56,10 @@ a régit – egy félbeszakadt mentés így nem teszi tönkre a meglévő beáll
 A fájlt (mert jelszó is lehet benne) csak a tulajdonos olvashatja.
 
 A hálózati lekérdezés és a könyvtárak átnézése külön szálon fut, így az ablak
-nem fagy le a nagy megosztásokon sem.
+nem fagy le a nagy megosztásokon sem. A **Megszakítás** gombbal bármikor le
+lehet állítani a munkát: a program két elem között áll meg, tehát félig törölt
+elem nem maradhat utána. A találati listát adagokban tölti fel, így sok tízezer
+soros eredménynél sem „fagy be” az ablak, és közben látszik a haladás.
 
 ## Parancssoros használat
 
@@ -141,6 +144,9 @@ nem bánt.
 | `--kis-nagy-betu` | Számítson a kis- és nagybetű a nevek összevetésénél (alapból nem számít – így inkább megtart valamit, mint hogy tévedésből töröljön). |
 | `--nem-biztonsagos-tls` | HTTPS-nél ne ellenőrizze a tanúsítványt. |
 | `--idokorlat MP` | Hálózati időkorlát (alap: 30 mp). |
+| `--probak DB` | Egy WebUI-hívás ennyiszer próbálkozzon átmeneti hiba esetén (alap: 3; `1` = ne próbálja újra). |
+| `--szalak DB` | A `--pontos` fájllista-lekérés párhuzamossága (alap: 8, legfeljebb 16). |
+| `--verzio` | A verzió kiírása. |
 
 Gyárilag védett nevek (a NAS és az operációs rendszer mappái):
 `.recycle`, `#recycle`, `@Recycle`, `@eaDir`, `.@__thumb`, `lost+found`,
@@ -155,6 +161,8 @@ alapból:
 |---|---|
 | Windows | `%APPDATA%\qbittorrent_clean\naplo\torlesek.log` |
 | Linux / macOS | `~/.local/state/qbittorrent_clean/naplo/torlesek.log` |
+
+(Az eseménynapló ugyanitt, `esemenyek.log` néven – lásd lentebb.)
 
 A sorok tabulatorral vannak elválasztva, így szövegszerkesztőben olvasható,
 táblázatkezelőben pedig egyből oszlopokra bomlik:
@@ -176,6 +184,26 @@ a napló mappája megnyitható. A próba (nem törlő) futás nem ír a naplóba
 naplózás soha nem állítja meg a takarítást: ha nem írható a fájl, csak szól
 róla.
 
+## Eseménynapló
+
+A törlési napló mellett készül egy `esemenyek.log` is, ugyanabban a mappában.
+Ez nem könyvelés, hanem **hibakeresés**: mikor indult a program, mit nem ért
+el, hány elemet talált, hol állt le.
+
+```
+2026-08-19 05:41:02  indul: felulet 2.1
+2026-08-19 05:41:20  a WebUI nem elerheto: Nem sikerult elerni a qBittorrent WebUI-t …
+2026-08-19 05:42:11  atnezve: 148 torrent, 6 felesleges elem (12.4 GB)
+2026-08-19 05:42:19  kesz: 6 elem torolve, 12.4 GB felszabadulva, 0 sikertelen
+```
+
+Erre azért van szükség, mert a **grafikus felületnek nincs konzolja**, az
+**ütemezett futásnak** pedig elnyeli a kimenetét a Feladatütemező: baj esetén
+másképp semmi nyom nem maradna. A **parancssor nem kerül bele**: a
+`--password` ott lehetne benne, és a napló nem való jelszótárnak. A fájl
+legfeljebb 512 KB, és három korábbi példányt tart meg – magától nem nő el. Parancssorból a `--nincs-naplo`
+kapcsolja ki (a törlési naplóval együtt).
+
 ## Amire figyel
 
 - A **félkész** letöltéseket megtartja: a `.!qB` végződésű fájlokat és a
@@ -186,6 +214,16 @@ róla.
 - A **kétféle perjelet** (`\` és `/`) ugyanannak veszi, így a `fa` mód akkor is
   egyezteti az útvonalakat, ha a qBittorrent Windowson fut.
 - **Szimbolikus linkbe nem lép be**, csak magát a linket törli.
+- Egy **átmeneti hálózati hiba** (a NAS épp ébred, a WebUI újraindul, torlódás)
+  nem buktatja el a takarítást: a program duplázódó várakozással újrapróbálja
+  (`--probak`), és a kiszolgáló `Retry-After` kérését is figyeli – legfeljebb
+  30 másodpercig, hogy egy elgépelt fejléc ne állítsa meg órákra.
+- A **lejárt WebUI-munkamenetbe** magától újra bejelentkezik. Egy több ezer
+  torrentes, fájlonkénti lekérdezés simán túléli a qBittorrent munkamenet-
+  határidejét; enélkül a felénél állna le.
+- A `--pontos` módhoz **csak a vizsgált könyvtárba eső torrentek** fájllistáját
+  kéri le, és azt is **párhuzamosan** (`--szalak`). Kétezer torrentből tipikusan
+  néhány tucat esik ide: a többi lekérdezése fölösleges hálózati forduló lenne.
 - Hiba esetén (nem elérhető WebUI, rossz jelszó, olvashatatlan könyvtár)
   **nem töröl semmit**.
 - A gyökérkönyvtárat (`/`, `C:\`) nem hajlandó takarítani; a megosztás gyökere
@@ -225,7 +263,7 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
 | `pyproject.toml` | A fejlesztői eszközök (ruff) beállítása; a program telepítés nélkül fut. |
-| `tests/` | Tesztkészlet (lásd lent). |
+| `tests/` | Tesztkészlet (lásd lent) és a felülvizsgálati jegyzőkönyv. |
 
 ## Teszt
 
@@ -239,6 +277,10 @@ Ugyanez fut a GitHubon is minden feltöltésnél
 (`.github/workflows/tesztek.yml`), a 3.10-től a 3.14-ig minden Python
 verzióval.
 
+A felülvizsgálat során talált hiányosságok, a javításuk és a mérések
+(párhuzamos lekérdezés, nagy megosztás átnézése, listafeltöltés) a
+[`tests/FELULVIZSGALAT.md`](tests/FELULVIZSGALAT.md) fájlban vannak.
+
 Hamis qBittorrent WebUI-t indít, valódi ideiglenes könyvtárfát épít, és
 ténylegesen töröltet vele – ellenőrizve, hogy a torrentekhez tartozó fájlok
 megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vész el.
@@ -249,4 +291,5 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
 | `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
-| `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése és elrontott beállítás-fájl, háttérszálban keletkező hiba. Fejnélküli gépen `xvfb-run` kell hozzá. |
+| `terheles_test.py` | Terhelés és mérés: 8000 bejegyzésű megosztás mindkét módban, memóriacsúcs, párhuzamos fájllista-lekérés, a lekérdezendő torrentek szűrése. A határok bőségesek, de a nagyságrendi elcsúszást elkapják. |
+| `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése és elrontott beállítás-fájl, háttérszálban keletkező hiba, megszakítás, a lista adagolt feltöltése. Fejnélküli gépen `xvfb-run` kell hozzá. |

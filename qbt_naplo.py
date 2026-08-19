@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Torlesi naplo: mi, mikor, honnan tunt el.
+"""Naplok: mi tunt el (torlesi naplo), es mi tortent (esemenynaplo).
 
 Minden torolt (vagy kukaba mozgatott) elemrol egy sor kerul a naploba: a
 pontos ido, a muvelet, a meret, es kulon oszlopban a konyvtar es a fajlnev.
@@ -11,6 +11,11 @@ A naplo magatol rotalodik: uj fajlt kezd, ha
   * a mostani fajl elerte a merethatart (alap: 5 MB).
 A lezart fajlt gzip-pel tomoriti (torlesek-2026-08-14.log.gz), es a
 megadott darabszamnal regebbieket eldobja.
+
+A masodik naplo (esemenyek.log) nem konyveles, hanem hibakereses: mikor
+indult a program, mit nem ert el, hol allt le. Ez a grafikus felulet - es az
+utemezett futas - egyetlen nyoma egy baj utan, mert ott nincs konzol, ami
+megorizne a kepernyore irt uzeneteket.
 
 A naplozas SOHA nem allithatja meg a takaritast: ha barmi gond van vele,
 csak jelzunk rola, es a torles megy tovabb.
@@ -26,30 +31,36 @@ import shutil
 import sys
 import time
 from datetime import datetime, timedelta
-from logging.handlers import BaseRotatingHandler
+from logging.handlers import BaseRotatingHandler, RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:  # csak a tipusokhoz kell, korkoros importot nem okoz
     from qbt_cleanup import Candidate
 
 # Alapertelmezesek. A merethatar es a megtartott fajlok szama a hivo oldalrol
 # is allithato (--naplo-meret, --naplo-tartas).
-ALAP_MERET = 5 * 1024 * 1024   # 5 MB
-ALAP_TARTAS = 12               # kb. negyedevnyi heti fajl
-NAPLO_NEV = "torlesek.log"
+ALAP_MERET: Final = 5 * 1024 * 1024   # 5 MB
+ALAP_TARTAS: Final = 12               # kb. negyedevnyi heti fajl
+NAPLO_NEV: Final = "torlesek.log"
 
-OSZLOPOK = ("ido", "muvelet", "tipus", "meret_bajt", "konyvtar", "nev",
-            "reszletek")
-FEJLEC = "\t".join(OSZLOPOK)
-IDO_ALAK = "%Y-%m-%d %H:%M:%S"
+# Az esemenynaplo (mi tortent a program koruli) kisebb es rovidebb ideig kell:
+# nem konyveles, hanem hibakereses.
+ESEMENY_NEV: Final = "esemenyek.log"
+ESEMENY_MERET: Final = 512 * 1024
+ESEMENY_TARTAS: Final = 3
+
+OSZLOPOK: Final = ("ido", "muvelet", "tipus", "meret_bajt", "konyvtar", "nev",
+                   "reszletek")
+FEJLEC: Final = "\t".join(OSZLOPOK)
+IDO_ALAK: Final = "%Y-%m-%d %H:%M:%S"
 
 
 def naplo_konyvtar() -> Path:
     """A naplo helye: Windowson az AppData, maskepp az XDG szerinti allapot-
     konyvtar (ide valok a naplok, nem a beallitasok melle)."""
     appdata = os.environ.get("APPDATA")
-    if appdata:
+    if sys.platform == "win32" and appdata:
         return Path(appdata) / "qbittorrent_clean" / "naplo"
     allapot = os.environ.get("XDG_STATE_HOME")
     alap = Path(allapot) if allapot else Path.home() / ".local" / "state"
@@ -58,6 +69,10 @@ def naplo_konyvtar() -> Path:
 
 def alap_naplo_fajl() -> Path:
     return naplo_konyvtar() / NAPLO_NEV
+
+
+def esemeny_naplo_fajl() -> Path:
+    return naplo_konyvtar() / ESEMENY_NEV
 
 
 def _kovetkezo_hetfo(mikor: datetime) -> float:
@@ -218,6 +233,59 @@ class TorlesNaplo:
     def __exit__(self, *_kivetel: object) -> None:
         self.close()
 
+
+# --------------------------------------------------------------- esemenyek
+
+# A torlesi naplo azt konyveli, MI tunt el. Az esemenynaplo azt, hogy MI
+# TORTENT a program korul: mikor indult, mit nem ert el, hol allt le. A ketto
+# szandekosan kulon fajl: a torlesi naplot tablazatkezeloben nezik, es nem
+# valo bele hibauzenet.
+#
+# A grafikus feluletnek ez az egyetlen nyoma egy baj utan (nincs konzolja), az
+# utemezett futasnak pedig szinten: a Feladatutemezo elnyeli a kimenetet.
+_esemeny_log: Final = logging.getLogger("qbittorrent_clean")
+_esemeny_log.propagate = False  # a hivo sajat naplozasat nem zavarjuk
+
+
+def esemenyek_indul(path: str | os.PathLike[str] | None = None) -> Path | None:
+    """Az esemenynaplo bekapcsolasa. Ha nem sikerul, csak None - a program
+    naplo nelkul is elmegy. Ketszer hivva nem nyit masodik fajlt."""
+    if _esemeny_log.handlers:  # mar be van kapcsolva: a meglevo fajl marad
+        meglevo = getattr(_esemeny_log.handlers[0], "baseFilename", "")
+        return Path(meglevo) if meglevo else None
+    cel = Path(path) if path else esemeny_naplo_fajl()
+    try:
+        cel.parent.mkdir(parents=True, exist_ok=True)
+        kezelo = RotatingFileHandler(
+            str(cel), maxBytes=ESEMENY_MERET, backupCount=ESEMENY_TARTAS,
+            encoding="utf-8")
+    except OSError:
+        return None
+    kezelo.setFormatter(logging.Formatter("%(asctime)s  %(message)s",
+                                          datefmt=IDO_ALAK))
+    _esemeny_log.addHandler(kezelo)
+    _esemeny_log.setLevel(logging.INFO)
+    return cel
+
+
+def jegyzet(uzenet: str, *args: object) -> None:
+    """Egy sor az esemenynaploba. Sosem dob hibat, es ha nincs bekapcsolva
+    naplo, akkor sem csinal semmit - a hivo helyen nem kell ellenorizni."""
+    if not _esemeny_log.handlers:
+        return
+    with contextlib.suppress(Exception):  # a naplo miatt semmi nem allhat meg
+        _esemeny_log.info(uzenet, *args)
+
+
+def esemenyek_lezar() -> None:
+    """A naplofajl elengedese (a tesztek utan ne maradjon nyitva semmi)."""
+    for kezelo in list(_esemeny_log.handlers):
+        _esemeny_log.removeHandler(kezelo)
+        with contextlib.suppress(Exception):
+            kezelo.close()
+
+
+# ------------------------------------------------------------ torlesi naplo
 
 def nyitas(path: str | os.PathLike[str] | None = None,
            max_bytes: int = ALAP_MERET,

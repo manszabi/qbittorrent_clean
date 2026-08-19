@@ -17,6 +17,13 @@ Gyors pelda (eloszor mindig szarazon!):
 
 Ha jonak tunik a lista, ugyanaz a parancs a vegen: --torol --igen
 
+Amire a program figyel:
+  * egy atmeneti halozati hiba nem buktatja el a takaritast (ujraprobalkozas),
+  * a lejart WebUI munkamenetbe ujra bejelentkezik,
+  * a --pontos modhoz csak a vizsgalt konyvtarba eso torrentek fajllistajat
+    keri le, es azt is parhuzamosan,
+  * hiba eseten egyetlen fajlhoz sem nyul.
+
 A jelszot nem kotelezo a parancssorba irni: ha nincs megadva, bekeri
 (vagy a QBT_PASSWORD kornyezeti valtozobol veszi).
 
@@ -58,28 +65,33 @@ import shutil
 import ssl
 import stat
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import qbt_naplo
 
-API = "/api/v2"
+__version__ = "2.1"
+
+API: Final = "/api/v2"
 
 # Ennel regebbi Pythonon a program nem indul el (a regebbi kiadasok mar nem
 # kapnak biztonsagi javitast sem).
-MIN_PYTHON = (3, 10)
+MIN_PYTHON: Final = (3, 10)
 
 # Ezeket soha nem bantjuk (a NAS vagy az operacios rendszer keszitette oket).
 # Sajat minta a --kivetel kapcsoloval adhato hozza, ez a lista pedig a
 # --nincs-gyari-kivetel kapcsoloval kapcsolhato ki.
-DEFAULT_EXCLUDES: tuple[str, ...] = (
+DEFAULT_EXCLUDES: Final[tuple[str, ...]] = (
     ".recycle",
     "#recycle",
     "@Recycle",
@@ -93,7 +105,7 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
 )
 
 # A qBittorrent ezt biggyeszti a felkesz fajlok vegere (ha be van kapcsolva).
-INCOMPLETE_SUFFIX = ".!qB"
+INCOMPLETE_SUFFIX: Final = ".!qB"
 
 # Windowson egy utvonal alapbol 260 karakter lehet - egy hosszu kiadasi nev es
 # egy alkonyvtar (Subs, Sample) ezt konnyen atlepi, es akkor a fajl "nem
@@ -101,7 +113,31 @@ INCOMPLETE_SUFFIX = ".!qB"
 # karakterig). Csak akkor tesszuk ki, ha tenyleg hosszu az ut: az eloteges
 # alakot a rendszer nyersen veszi (nincs / -> \ atirasa, nincs "." es ".."),
 # ezert felesleges kockazat lenne mindenhol hasznalni.
-WINDOWS_UT_HATAR = 240
+WINDOWS_UT_HATAR: Final = 240
+
+# Egy utvonal ennyi darabbol all legalabb, ha nem gyoker konyvtar ("/" + nev).
+GYOKER_RESZEK: Final = 2
+
+# --- halozat -----------------------------------------------------------------
+# Ezekre a valaszokra van ertelme ujraprobalni: mindegyik atmeneti allapot
+# (torlodas, ujraindulo kiszolgalo, halozati akadas). A 4xx tobbi tagja - rossz
+# jelszo, nem letezo hivas - hiaba jonne ujra, ugyanaz lenne a valasz.
+UJRAPROBALHATO: Final = frozenset({408, 429, 500, 502, 503, 504})
+HTTP_TILTVA: Final = 403                # lejart munkamenet vagy rossz jelszo
+MAX_RETRY_AFTER: Final = 30             # a Retry-After fejlecet ennyire vagjuk
+ALAP_PROBAK: Final = 3                  # ennyiszer probalunk egy hivast
+PROBA_SZUNET: Final = 1.0               # az elso ujraprobalkozas elotti szunet
+ALAP_SZALAK: Final = 8                  # a fajllista-lekeres parhuzamossaga
+MAX_SZALAK: Final = 16
+
+# A takaritas kozben ilyen surun (elemenkent) nezzuk meg, kertek-e megszakitast,
+# es adunk visszajelzest a hivonak. Fajlonkent hivni feleslegesen draga lenne.
+JELZES_ELEMENKENT: Final = 200
+
+# Egy meretegyseg (KB, MB, ...) valtoszama, es a felsorolasokbol ennyi tetelt
+# mutatunk meg - a tobbi csak darabszamkent jelenik meg.
+EGYSEG: Final = 1024
+MUTATOTT_RESZLET: Final = 10
 
 # A qBittorrent egy torrentjenek leiroja (a WebUI JSON valasza), illetve egy
 # utvonal-megfeleltetes: (a qBittorrent szerinti ut, a helyi ut).
@@ -118,6 +154,41 @@ class SafetyStop(QbtError):
     torolne (nincs torrent, vagy rossz az utvonal-megfeleltetes)."""
 
 
+class BeallitasHiba(QbtError):
+    """A megadott kapcsolok nem jok (nincs ilyen konyvtar, rossz megfeleltetes).
+    Ilyenkor nem a halozattal vagy a lemezzel van baj, hanem a keressel -
+    ezert mas a visszateresi ertek is (2, nem 1)."""
+
+
+class Megszakitva(Exception):
+    """A felhasznalo kerte a leallast. Nem hiba: ami addig elkeszult, az jo -
+    ezert kulon kivetel, nem QbtError."""
+
+
+class Mod(str, Enum):
+    """A ket uzemmod. Szoveg-alapu, igy a parancssori ertek (felso / fa) es a
+    beallitas-fajlban tarolt szoveg valtozatlanul hasznalhato."""
+
+    FELSO = "felso"
+    FA = "fa"
+
+    def __str__(self) -> str:  # a kiirasban a nyers ertek jelenjen meg
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class Halozat:
+    """A WebUI-hoz vezeto ut beallitasai egyben.
+
+    Egy csomagban tartva a hivonak nem kell ot kulon parametert atadnia (es a
+    kesobb hozzajovo beallitas sem torik el minden hivast)."""
+
+    timeout: float = 30.0
+    probak: int = ALAP_PROBAK       # 1 = nincs ujraprobalkozas
+    insecure: bool = False
+    szalak: int = ALAP_SZALAK       # a fajllista-lekeres parhuzamossaga
+
+
 # ------------------------------------------------------------------ WebUI
 
 class QbtClient:
@@ -129,17 +200,17 @@ class QbtClient:
         url: str,
         username: str | None = None,
         password: str | None = None,
-        timeout: float = 30,
-        insecure: bool = False,
+        halozat: Halozat | None = None,
     ) -> None:
         self.base = url.rstrip("/")
         if not self.base.startswith(("http://", "https://")):
             self.base = "http://" + self.base
         self.username = username
         self.password = password
-        self.timeout = timeout
+        self.halozat = halozat or Halozat()
+        self.timeout = self.halozat.timeout
         ctx: ssl.SSLContext | None = None
-        if insecure:
+        if self.halozat.insecure:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -147,13 +218,17 @@ class QbtClient:
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
             urllib.request.HTTPSHandler(context=ctx),
         )
+        # A tobb szalbol valo hasznalat rendben van: minden hivas sajat
+        # kapcsolatot nyit, a sutis tarolot pedig a http.cookiejar maga zarja.
+        # Az ujrabelepest viszont csak egy szal vegezze el (kulonben tizen
+        # kuldenenek egyszerre bejelentkezest ugyanarra a lejart munkamenetre).
+        self._belepes_zar = threading.Lock()
 
-    def _call(
-        self,
-        path: str,
-        params: dict[str, str] | None = None,
-        post: bool = False,
-    ) -> str:
+    # -- egyetlen hivas ----------------------------------------------------
+
+    def _keres(self, path: str, params: dict[str, str] | None,
+               post: bool) -> str:
+        """Egy HTTP hivas, ujraprobalkozas nelkul."""
         url = self.base + path
         data = None
         if params and post:
@@ -164,31 +239,95 @@ class QbtClient:
         # A WebUI ellenorzi a keres eredetet (CSRF vedelem).
         req.add_header("Referer", self.base)
         req.add_header("Origin", self.base)
-        req.add_header("User-Agent", "qbt_cleanup.py")
-        try:
-            with self.opener.open(req, timeout=self.timeout) as resp:
-                return resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            body = ""
-            with contextlib.suppress(OSError):  # a valasz mar elszallhatott
-                body = exc.read().decode("utf-8", "replace").strip()
-            if exc.code == 403:
-                raise QbtError(
-                    "A WebUI elutasitotta a kerest (403). Rossz jelszo, lejart "
-                    "munkamenet, vagy a WebUI-ban be van kapcsolva a kulso "
-                    "hivatkozas tiltasa."
-                ) from exc
+        req.add_header("User-Agent", f"qbt_cleanup.py/{__version__}")
+        with self.opener.open(req, timeout=self.timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+
+    @staticmethod
+    def _varakozas(exc: urllib.error.HTTPError, proba: int) -> float:
+        """Mennyit varjunk az ujraprobalkozas elott.
+
+        Ha a kiszolgalo megmondja (Retry-After), azt fogadjuk el - de legfeljebb
+        MAX_RETRY_AFTER masodpercig, kulonben egy elgepelt fejleccel orakra
+        megallithatna a takaritast. Kulonben duplazodo varakozas."""
+        fejlec = ""
+        with contextlib.suppress(AttributeError, TypeError):
+            fejlec = (exc.headers.get("Retry-After") or "").strip()
+        if fejlec:
+            try:
+                return max(0.0, min(float(fejlec), MAX_RETRY_AFTER))
+            except ValueError:
+                pass  # a datum alaku Retry-After-t nem ertelmezzuk
+        return PROBA_SZUNET * (2 ** proba)
+
+    def _call(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        post: bool = False,
+        ujrabelepes: bool = True,
+    ) -> str:
+        """Egy WebUI hivas, atmeneti hibara ujraprobalkozassal.
+
+        Egy halozati zokkeno (a NAS eppen ebred, a kiszolgalo ujraindul, a
+        WebUI torlodik) korabban azonnal elbuktatta az egesz takaritast. A
+        vegleges hibakon (rossz jelszo, nem letezo hivas) viszont nincs ertelme
+        ujraprobalni: azok elsore elszallnak.
+
+        Az ujrakuldes azert biztonsagos, mert az egyetlen POST hivas a
+        bejelentkezes - azt ketszer elkuldeni sem valtoztat semmin. A tobbi
+        hivas csak lekerdez."""
+        utolso: Exception | None = None
+        for proba in range(max(1, self.halozat.probak)):
+            if proba:
+                time.sleep(self._varakozas(utolso, proba - 1)
+                           if isinstance(utolso, urllib.error.HTTPError)
+                           else PROBA_SZUNET * (2 ** (proba - 1)))
+            try:
+                return self._keres(path, params, post)
+            except urllib.error.HTTPError as exc:
+                body = ""
+                with contextlib.suppress(OSError):  # a valasz mar elszallhatott
+                    body = exc.read().decode("utf-8", "replace").strip()
+                if exc.code == HTTP_TILTVA:
+                    # A qBittorrent egy ido utan elengedi a munkamenetet. Egy
+                    # hosszu (fajlonkenti) lekerdezes ebbe konnyen belefut -
+                    # ilyenkor eleg ujra bejelentkezni, nem kell elolrol
+                    # kezdeni az egeszet. Ha a jelszo rossz, a belepes maga
+                    # szall el, ertheto uzenettel.
+                    if ujrabelepes and self.username and not post:
+                        with self._belepes_zar:
+                            self.login()
+                        return self._call(path, params, post,
+                                          ujrabelepes=False)
+                    raise QbtError(
+                        "A WebUI elutasitotta a kerest (403). Rossz jelszo, "
+                        "lejart munkamenet, vagy a WebUI-ban be van kapcsolva "
+                        "a kulso hivatkozas tiltasa."
+                    ) from exc
+                if exc.code not in UJRAPROBALHATO:
+                    raise QbtError(
+                        f"HTTP {exc.code} a {path} hivasnal"
+                        + (f": {body}" if body else "")
+                    ) from exc
+                utolso = exc
+            except urllib.error.URLError as exc:
+                utolso = exc
+            except OSError as exc:
+                utolso = exc
+        if isinstance(utolso, urllib.error.HTTPError):
             raise QbtError(
-                f"HTTP {exc.code} a {path} hivasnal"
-                + (f": {body}" if body else "")
-            ) from exc
-        except urllib.error.URLError as exc:
+                f"HTTP {utolso.code} a {path} hivasnal, {self.halozat.probak} "
+                "probalkozas utan is"
+            ) from utolso
+        if isinstance(utolso, urllib.error.URLError):
             raise QbtError(
                 f"Nem sikerult elerni a qBittorrent WebUI-t ({self.base}): "
-                f"{exc.reason}"
-            ) from exc
-        except OSError as exc:
-            raise QbtError(f"Halozati hiba a {path} hivasnal: {exc}") from exc
+                f"{utolso.reason}"
+            ) from utolso
+        raise QbtError(f"Halozati hiba a {path} hivasnal: {utolso}") from utolso
+
+    # -- a WebUI hivasai ---------------------------------------------------
 
     def login(self) -> None:
         """Bejelentkezes. Ures felhasznalonevnel kihagyjuk - van, ahol a helyi
@@ -221,6 +360,42 @@ class QbtClient:
         if not isinstance(data, list):
             raise QbtError(f"Varatlan fajllista a(z) {torrent_hash} torrenthez")
         return data
+
+    def files_many(
+        self,
+        hashes: Sequence[str],
+        on_progress: Callable[[int, int], None] | None = None,
+        megszakitva: Callable[[], bool] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Tobb torrent fajllistaja egyszerre.
+
+        A qBittorrent API-ban nincs kotegelt lekeres: torrentenkent egy hivas
+        kell. Egyenkent, egymas utan ez ezer torrentnel percekben merheto -
+        pedig a legtobb ido varakozas. Ezert parhuzamosan kerdezzuk le; a
+        parhuzamossag felso hatara MAX_SZALAK, hogy egy gyenge NAS-t se
+        terheljunk tul."""
+        eredmeny: dict[str, list[dict[str, Any]]] = {}
+        egyediek = list(dict.fromkeys(h for h in hashes if h))
+        if not egyediek:
+            return eredmeny
+        szalak = max(1, min(self.halozat.szalak, MAX_SZALAK, len(egyediek)))
+        kesz = 0
+        pool = ThreadPoolExecutor(max_workers=szalak,
+                                  thread_name_prefix="qbt-fajlok")
+        try:
+            munkak = {pool.submit(self.files, h): h for h in egyediek}
+            for munka in as_completed(munkak):
+                eredmeny[munkak[munka]] = munka.result()
+                kesz += 1
+                if on_progress:
+                    on_progress(kesz, len(egyediek))
+                if megszakitva and megszakitva():
+                    raise Megszakitva
+        finally:
+            # A meg el sem indult hivasokat eldobjuk, a folyamatban levokre nem
+            # varunk: megszakitaskor (es hiba eseten) igy all meg azonnal.
+            pool.shutdown(wait=False, cancel_futures=True)
+        return eredmeny
 
     def _json(self, path: str, params: dict[str, str] | None, what: str) -> Any:
         text = self._call(path, params)
@@ -352,7 +527,7 @@ def is_root_like(path: Path) -> bool:
     if is_unc(path):
         # \\gep\megosztas maga rendben; a \\gep resze mar nem letezo konyvtar
         return False
-    return len(path.parts) < 2 or str(path) == path.anchor
+    return len(path.parts) < GYOKER_RESZEK or str(path) == path.anchor
 
 
 def parse_map(entry: str) -> PathMap:
@@ -545,7 +720,7 @@ def entry_size(path: str | os.PathLike[str], is_dir: bool) -> int:
     Szandekosan os.scandir()-rel jarja be a fat, es a bejegyzes sajat
     stat()-jat kerdezi: Windowson ez a konyvtar beolvasasakor mar megkapott
     adatbol dolgozik, tehat NEM kell fajlonkent kulon kerdes a kiszolgalotol.
-    Egy Samba megosztason ez konyvtaranként egy fordulo, nem fajlonkent egy -
+    Egy Samba megosztason ez konyvtarankent egy fordulo, nem fajlonkent egy -
     nagy megosztason ez a kulonbseg masodpercekben merheto.
 
     Olvashatatlan alkonyvtaron nem akad el: azt a reszt kihagyja."""
@@ -582,7 +757,7 @@ class Kivetelek:
     A mintakat egyszer hozzuk osszehasonlithato alakra, nem minden egyes
     fajlnevnel ujra. A mintaillesztes (fnmatch) draga, ezert a csillagot /
     kerdojelet nem tartalmazo neveket kulon halmazban tartjuk: azoknal eleg
-    egy keresés."""
+    egy kereses."""
 
     __slots__ = ("mintak", "pontos")
 
@@ -627,27 +802,100 @@ def scandir_sorted(path: str | os.PathLike[str]) -> list[os.DirEntry[str]]:
             f"Nem tudom beolvasni a konyvtarat ({path}): {exc}") from exc
 
 
-def plan_toplevel(
-    target: str | os.PathLike[str],
-    names: set[str],
-    excludes: Iterable[str] = (),
-    ignore_case: bool = True,
-    min_age_days: float = 0,
-    protected: Iterable[str | os.PathLike[str]] = (),
-) -> list[Candidate]:
+@dataclass(frozen=True, slots=True)
+class Beallitas:
+    """A takaritas osszes kapcsoloja egy helyen.
+
+    Korabban ugyanez tizenket kulon parameterkent utazott a fuggvenyek kozott;
+    egy uj kapcsolo minden hivast atirt, es konnyu volt elcsuszni a sorrendben.
+    Igy a hivo egy csomagot ad at, a bovites pedig visszafele is jo marad."""
+
+    mode: Mod = Mod.FELSO
+    maps: tuple[PathMap, ...] = ()
+    excludes: tuple[str, ...] = DEFAULT_EXCLUDES
+    ignore_case: bool = True
+    min_age_days: float = 0.0
+    # Amit a vizsgalt konyvtarakon kivul meg vedeni kell (tipikusan a kuka).
+    extra_protected: tuple[Path, ...] = ()
+    allow_empty: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Figyelo:
+    """Visszajelzes a takaritas kozben - es a megszakitas lehetosege.
+
+    Mindegyik mezo elhagyhato: parancssorbol tobbnyire eleg a jelzes, a
+    feluletnek viszont kell a haladas es a megallitas is. A megszakitast azert
+    kerdezzuk (es nem esemenyt varunk), mert igy a hivo dontheti el, mit tekint
+    megszakitasnak - a felulet egy Event-et, a parancssor a Ctrl+C-t."""
+
+    on_note: Callable[[Path, int], None] | None = None
+    on_warn: Callable[[str], None] | None = None
+    on_progress: Callable[[str], None] | None = None
+    megszakitva: Callable[[], bool] | None = None
+
+    def jegyzet(self, target: Path, darab: int) -> None:
+        if self.on_note:
+            self.on_note(target, darab)
+
+    def figyelmeztet(self, szoveg: str) -> None:
+        if self.on_warn:
+            self.on_warn(szoveg)
+
+    def jelez(self, szoveg: str) -> None:
+        if self.on_progress:
+            self.on_progress(szoveg)
+
+    def ellenoriz(self) -> None:
+        """Megszakitast kertek? Akkor itt allunk meg - ket elem kozott, tehat
+        felig torolt allapot nem maradhat utana."""
+        if self.megszakitva and self.megszakitva():
+            raise Megszakitva
+
+
+@dataclass(frozen=True, slots=True)
+class _Terv:
+    """Egy konyvtar atnezesenek osszes kelleke, elokeszitett alakban.
+
+    A kivetel-mintakat es a vedett utvonalakat egyszer hozzuk osszehasonlithato
+    alakra, nem minden egyes fajlnal ujra."""
+
+    beallitas: Beallitas
+    kivetelek: Kivetelek
+    vedett: frozenset[str]
+    figyelo: Figyelo
+
+    @classmethod
+    def keszit(cls, beallitas: Beallitas, vedett: Iterable[Any],
+               figyelo: Figyelo) -> _Terv:
+        kis_nagy = beallitas.ignore_case
+        return cls(
+            beallitas=beallitas,
+            kivetelek=Kivetelek(beallitas.excludes, kis_nagy),
+            vedett=frozenset(path_key(x, kis_nagy) for x in vedett),
+            figyelo=figyelo,
+        )
+
+    def bekenhagy(self, key: str, nev_kulcs: str) -> bool:
+        """Igaz, ha ehhez az elemhez semmikepp nem nyulunk: masik vizsgalt
+        konyvtar (vagy a kuka), illetve kivetel-minta."""
+        return key in self.vedett or self.kivetelek.talal(nev_kulcs)
+
+
+def plan_toplevel(target: str | os.PathLike[str], names: set[str],
+                  terv: _Terv) -> list[Candidate]:
     """Csak a legfelso szint, nevek alapjan."""
     out: list[Candidate] = []
-    kivetelek = Kivetelek(excludes, ignore_case)
-    protected_keys = {path_key(p, ignore_case) for p in protected}
+    kis_nagy = terv.beallitas.ignore_case
     for entry in scandir_sorted(target):
+        terv.figyelo.ellenoriz()
         full = Path(target) / entry.name
-        if path_key(full, ignore_case) in protected_keys:
+        nev_kulcs = norm_key(entry.name, kis_nagy)
+        if terv.bekenhagy(path_key(full, kis_nagy), nev_kulcs):
             continue
-        if kivetelek.talal(norm_key(entry.name, ignore_case)):
-            continue
-        if kesz_kulcs(norm_key(entry.name, ignore_case), ignore_case) in names:
+        if kesz_kulcs(nev_kulcs, kis_nagy) in names:
             continue  # a torrente (a felkesz .!qB valtozata is)
-        if too_young(full, min_age_days):
+        if too_young(full, terv.beallitas.min_age_days):
             continue
         if entry.is_symlink():
             out.append(Candidate(full, False, 0, "nem tartozik torrenthez (link)"))
@@ -658,16 +906,8 @@ def plan_toplevel(
     return out
 
 
-def plan_tree(
-    target: str | os.PathLike[str],
-    roots: set[str],
-    dirs: set[str],
-    excludes: Iterable[str] = (),
-    ignore_case: bool = True,
-    min_age_days: float = 0,
-    protected: Iterable[str | os.PathLike[str]] = (),
-    on_warn: Callable[[str], None] | None = None,
-) -> list[Candidate]:
+def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
+              terv: _Terv) -> list[Candidate]:
     """Teljes konyvtarfa, utvonalak alapjan.
 
     Szandekosan nem rekurziv: egy melyen agazo megosztason a rekurzio
@@ -675,13 +915,13 @@ def plan_tree(
 
     Egy alkonyvtar olvasasi hibaja (jogosultsag, halozati akadas) nem allitja
     le az egeszet: azt az agat kihagyjuk - ami ott van, azt nem toroljuk -, es
-    szolunk rola az `on_warn` hivason keresztul. Magat a vizsgalt konyvtarat
-    viszont tudnunk kell olvasni, kulonben nem tudjuk, mi van benne."""
+    szolunk rola a figyelon keresztul. Magat a vizsgalt konyvtarat viszont
+    tudnunk kell olvasni, kulonben nem tudjuk, mi van benne."""
     out: list[Candidate] = []
-    kivetelek = Kivetelek(excludes, ignore_case)
-    protected_keys = {path_key(p, ignore_case) for p in protected}
+    kis_nagy = terv.beallitas.ignore_case
     gyoker = Path(target)
     varolista = [gyoker]
+    atnezett = 0
     while varolista:
         path = varolista.pop()
         try:
@@ -689,17 +929,20 @@ def plan_tree(
         except QbtError as exc:
             if path == gyoker:
                 raise
-            if on_warn:
-                on_warn(str(exc))
+            terv.figyelo.figyelmeztet(str(exc))
             continue
         for entry in bejegyzesek:
+            atnezett += 1
+            if atnezett % JELZES_ELEMENKENT == 0:
+                terv.figyelo.ellenoriz()
+                terv.figyelo.jelez(
+                    f"{target}: {atnezett} elem atnezve, "
+                    f"{len(out)} felesleges...")
             full = path / entry.name
-            key = path_key(full, ignore_case)
-            if key in protected_keys:
+            key = path_key(full, kis_nagy)
+            if terv.bekenhagy(key, norm_key(entry.name, kis_nagy)):
                 continue
-            if kivetelek.talal(norm_key(entry.name, ignore_case)):
-                continue
-            if kesz_kulcs(key, ignore_case) in roots:
+            if kesz_kulcs(key, kis_nagy) in roots:
                 continue  # a torrente: se o, se ami alatta van
             if entry.is_symlink():
                 if key not in dirs:
@@ -710,27 +953,56 @@ def plan_tree(
             if is_dir and key in dirs:
                 varolista.append(full)  # van alatta megtartando elem
                 continue
-            if too_young(full, min_age_days):
+            if too_young(full, terv.beallitas.min_age_days):
                 continue
             out.append(Candidate(full, is_dir, entry_size(full, is_dir),
                                  "nem tartozik torrenthez"))
-    out.sort(key=lambda c: path_key(c.path, ignore_case))
+    out.sort(key=lambda c: path_key(c.path, kis_nagy))
     return out
+
+
+def erintett_torrentek(
+    torrents: Sequence[Torrent],
+    targets: Sequence[Path],
+    beallitas: Beallitas,
+) -> list[str]:
+    """Azoknak a torrenteknek az azonositoja, amik a vizsgalt konyvtarakba
+    esnek.
+
+    Csak ezeknek kell fajlonkent lekerni a tartalmat (--pontos). Egy nagy
+    qBittorrentben a torrentek tobbsege tipikusan mas konyvtarban lakik: az o
+    fajllistajuk lekerese torrentenkent egy felesleges halozati fordulo lenne,
+    az eredmenyt pedig ugyis eldobnank."""
+    kis_nagy = beallitas.ignore_case
+    cel_kulcsok = [path_key(t, kis_nagy) for t in targets]
+    kellenek: list[str] = []
+    for torrent in torrents:
+        thash = torrent.get("hash") or ""
+        if not thash:
+            continue
+        for nyers in (torrent.get("save_path"), torrent.get("download_path"),
+                      torrent.get("content_path")):
+            helyi = apply_maps(normalize_remote(nyers or ""), beallitas.maps,
+                               kis_nagy)
+            if not helyi:
+                continue
+            kulcs = path_key(helyi, kis_nagy)
+            # Az is szamit, ha a torrent a vizsgalt konyvtar FOLOTT van: a
+            # fajljai akkor is beleeshetnek (pl. save_path=/downloads, a
+            # vizsgalt konyvtar meg /downloads/rss).
+            if any(under(kulcs, cel) or under(cel, kulcs)
+                   for cel in cel_kulcsok):
+                kellenek.append(thash)
+                break
+    return kellenek
 
 
 def plan_all(
     torrents: Sequence[Torrent],
     files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
     targets: Sequence[Path],
-    mode: str = "felso",
-    maps: Sequence[PathMap] = (),
-    excludes: Iterable[str] = (),
-    ignore_case: bool = True,
-    min_age_days: float = 0,
-    extra_protected: Iterable[str | os.PathLike[str]] = (),
-    allow_empty: bool = False,
-    on_note: Callable[[Path, int], None] | None = None,
-    on_warn: Callable[[str], None] | None = None,
+    beallitas: Beallitas | None = None,
+    figyelo: Figyelo | None = None,
 ) -> list[Candidate]:
     """A teljes terv: mely elemekhez nem tartozik mar torrent.
 
@@ -741,30 +1013,32 @@ def plan_all(
     torolne - ilyenkor sokkal valoszinubb, hogy a beallitas rossz, mint hogy
     tenyleg minden felesleges.
     """
-    if not torrents and not allow_empty:
+    beallitas = beallitas or Beallitas()
+    figyelo = figyelo or Figyelo()
+    if not torrents and not beallitas.allow_empty:
         raise SafetyStop("A qBittorrentben egyetlen torrent sincs, igy MINDENT "
                          "torolne.")
-    excludes = tuple(excludes)
-    extra_protected = tuple(extra_protected)
-    names = owned_names(torrents, ignore_case) if mode == "felso" else set()
+    kis_nagy = beallitas.ignore_case
+    names = (owned_names(torrents, kis_nagy)
+             if beallitas.mode == Mod.FELSO else set())
     candidates: list[Candidate] = []
     for target in targets:
-        protected = [t for t in targets if t != target] + list(extra_protected)
-        if mode == "felso":
-            candidates += plan_toplevel(target, names, excludes, ignore_case,
-                                        min_age_days, protected)
-        else:
-            roots, dirs = owned_paths(torrents, files_by_hash, maps, target,
-                                      ignore_case)
-            if on_note:
-                on_note(target, len(roots))
-            if not roots and not allow_empty:
-                raise SafetyStop(
-                    f"Egyetlen torrent-elem sem esik a(z) {target} konyvtarba. "
-                    "Valoszinuleg utvonal-megfeleltetes kell (TAVOLI=HELYI). "
-                    "Igy MINDENT torolne, ezert leallok.")
-            candidates += plan_tree(target, roots, dirs, excludes, ignore_case,
-                                    min_age_days, protected, on_warn)
+        figyelo.ellenoriz()
+        vedett = [t for t in targets if t != target]
+        vedett += list(beallitas.extra_protected)
+        terv = _Terv.keszit(beallitas, vedett, figyelo)
+        if beallitas.mode == Mod.FELSO:
+            candidates += plan_toplevel(target, names, terv)
+            continue
+        roots, dirs = owned_paths(torrents, files_by_hash, beallitas.maps,
+                                  target, kis_nagy)
+        figyelo.jegyzet(target, len(roots))
+        if not roots and not beallitas.allow_empty:
+            raise SafetyStop(
+                f"Egyetlen torrent-elem sem esik a(z) {target} konyvtarba. "
+                "Valoszinuleg utvonal-megfeleltetes kell (TAVOLI=HELYI). "
+                "Igy MINDENT torolne, ezert leallok.")
+        candidates += plan_tree(target, roots, dirs, terv)
     return candidates
 
 
@@ -774,9 +1048,9 @@ def human(size: float) -> str:
     """Ember szamara olvashato meret."""
     value = float(size)
     for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if value < 1024 or unit == "PB":
+        if value < EGYSEG or unit == "PB":
             return f"{int(size)} B" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
+        value /= EGYSEG
     return f"{int(size)} B"  # pragma: no cover - a ciklus mindig visszater
 
 
@@ -816,6 +1090,25 @@ def remove_file(path: str | os.PathLike[str]) -> None:
         os.remove(hosszu_ut(path))
     except PermissionError:
         force_remove(os.remove, hosszu_ut(path))
+
+
+def csere_ujraprobalva(forras: Path, cel: Path, probak: int = 5) -> None:
+    """Fajl vegleges helyre mozgatasa (a beallitasok mentesehez).
+
+    Eloszor ideiglenes fajlba irunk, es csak keszen cserelunk - igy egy
+    felbeszakadt mentes nem teszi tonkre a meglevo fajlt. A cserenel viszont
+    Windowson a viruskereso, a keresoindexelo vagy egy megnyitott elonezet
+    atmenetileg fogva tarthatja a celt, es a csere PermissionError-ral
+    elszallna: ilyenkor rovid varakozas utan ujraprobaljuk. Linuxon es
+    macOS-en ez az ag gyakorlatilag sosem fut le."""
+    for proba in range(max(1, probak)):
+        try:
+            os.replace(forras, cel)
+            return
+        except PermissionError:
+            if proba == probak - 1:
+                raise
+            time.sleep(0.15 * 2 ** proba)
 
 
 def owner_target(
@@ -889,6 +1182,13 @@ def nemnegativ_szam(szoveg: str) -> float:
 
 def pozitiv_szam(szoveg: str) -> float:
     ertek = float(szoveg)
+    if ertek <= 0:
+        raise argparse.ArgumentTypeError("nullanal nagyobbnak kell lennie")
+    return ertek
+
+
+def pozitiv_egesz(szoveg: str) -> int:
+    ertek = int(szoveg)
     if ertek <= 0:
         raise argparse.ArgumentTypeError("nullanal nagyobbnak kell lennie")
     return ertek
@@ -979,6 +1279,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idokorlat", dest="timeout", type=pozitiv_szam,
                         default=30, metavar="MP",
                         help="halozati idokorlat (alap: 30 mp)")
+    parser.add_argument("--probak", type=pozitiv_egesz, default=ALAP_PROBAK,
+                        metavar="DB",
+                        help="egy WebUI hivas ennyiszer probalkozzon atmeneti "
+                             "hiba eseten (alap: %(default)s; 1 = ne probaljon "
+                             "ujra)")
+    parser.add_argument("--szalak", type=pozitiv_egesz, default=ALAP_SZALAK,
+                        metavar="DB",
+                        help=f"a --pontos fajllista-lekeres parhuzamossaga "
+                             f"(alap: %(default)s, legfeljebb {MAX_SZALAK})")
+    parser.add_argument("--verzio", "--version", action="version",
+                        version=f"qbt_cleanup.py {__version__}",
+                        help="a verzio kiirasa")
     return parser
 
 
@@ -1011,11 +1323,11 @@ def _celkonyvtarak(nyers: Iterable[str], ignore_case: bool) -> list[Path]:
     for raw in nyers:
         target = normalize_target(raw)
         if not target.exists():
-            raise QbtError(f"Nincs ilyen konyvtar: {target}")
+            raise BeallitasHiba(f"Nincs ilyen konyvtar: {target}")
         if not target.is_dir():
-            raise QbtError(f"Nem konyvtar: {target}")
+            raise BeallitasHiba(f"Nem konyvtar: {target}")
         if is_root_like(target):
-            raise QbtError(
+            raise BeallitasHiba(
                 f"Biztonsagi okbol a gyoker konyvtarat nem takaritom: {target}")
         # Ugyanaz a konyvtar ketszer megadva ketszer is torolne (masodszor mar
         # hibaval), ezert csak egyszer vesszuk fel.
@@ -1026,121 +1338,188 @@ def _celkonyvtarak(nyers: Iterable[str], ignore_case: bool) -> list[Path]:
     return targets
 
 
-def _main(argv: Sequence[str] | None) -> int:
-    _utf8_kimenet()
+@dataclass(slots=True)
+class _Futas:
+    """A parancssorbol osszeallitott, mar ellenorzott futas.
 
-    args = build_parser().parse_args(argv)
-    ignore_case = not args.case_sensitive
+    Azert kulon, mert az elokeszites (kapcsolok ertelmezese, konyvtarak
+    ellenorzese) es a vegrehajtas ket kulon dolog: igy mindketto onmagaban
+    olvashato es tesztelheto marad."""
 
+    targets: list[Path]
+    beallitas: Beallitas
+    halozat: Halozat
+    trash_dir: Path | None = None
+
+
+def _kuka_elokeszites(args: argparse.Namespace, targets: Sequence[Path],
+                      ignore_case: bool) -> Path | None:
+    """A kuka konyvtar letrehozasa es ellenorzese. Hiba eseten QbtError."""
+    if not args.kuka:
+        return None
+    trash_dir = normalize_target(args.kuka)
     try:
-        targets = _celkonyvtarak(args.konyvtarak, ignore_case)
-        maps = [parse_map(entry) for entry in args.utvonal]
-    except (QbtError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+        trash_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise BeallitasHiba(
+            f"Nem tudom letrehozni a kukat ({trash_dir}): {exc}") from exc
+    kuka_kulcs = path_key(trash_dir, ignore_case)
+    if any(kuka_kulcs == path_key(t, ignore_case) for t in targets):
+        raise BeallitasHiba("A kuka nem lehet maga a vizsgalt konyvtar.")
+    return trash_dir
 
-    if args.pontos and args.mod != "fa":
-        print("Figyelem: a --pontos csak a 'fa' modban szamit, most nem hasznalom.",
-              file=sys.stderr)
-    if args.utvonal and args.mod != "fa":
-        print("Figyelem: az --utvonal csak a 'fa' modban szamit.", file=sys.stderr)
 
-    excludes = list(args.kivetel)
+def _elokeszites(args: argparse.Namespace) -> _Futas:
+    """A kapcsolokbol ellenorzott futas. Hiba eseten QbtError vagy ValueError."""
+    ignore_case = not args.case_sensitive
+    targets = _celkonyvtarak(args.konyvtarak, ignore_case)
+    maps = tuple(parse_map(entry) for entry in args.utvonal)
+    trash_dir = _kuka_elokeszites(args, targets, ignore_case)
+
+    excludes = tuple(args.kivetel)
     if not args.no_default_excludes:
         excludes += DEFAULT_EXCLUDES
 
-    trash_dir: Path | None = None
-    if args.kuka:
-        trash_dir = normalize_target(args.kuka)
-        try:
-            trash_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            print(f"Nem tudom letrehozni a kukat ({trash_dir}): {exc}",
-                  file=sys.stderr)
-            return 2
-        kuka_kulcs = path_key(trash_dir, ignore_case)
-        if any(kuka_kulcs == path_key(t, ignore_case) for t in targets):
-            print("A kuka nem lehet maga a vizsgalt konyvtar.", file=sys.stderr)
-            return 2
+    beallitas = Beallitas(
+        mode=Mod(args.mod),
+        maps=maps,
+        excludes=excludes,
+        ignore_case=ignore_case,
+        min_age_days=args.min_age,
+        extra_protected=(trash_dir,) if trash_dir else (),
+        allow_empty=args.allow_empty,
+    )
+    halozat = Halozat(timeout=args.timeout, probak=args.probak,
+                      insecure=args.insecure, szalak=args.szalak)
+    return _Futas(targets, beallitas, halozat, trash_dir)
 
+
+def _jelszo(args: argparse.Namespace) -> str | None:
+    """A jelszo a parancssorbol, a kornyezetbol, vagy bekerve. Ha kellene, de
+    nincs honnan venni: QbtError."""
     password = args.password
     if password is None:
         password = os.environ.get("QBT_PASSWORD")
     if args.user and password is None:
-        if sys.stdin.isatty():
-            password = getpass.getpass(f"qBittorrent jelszo ({args.user}): ")
+        if not sys.stdin.isatty():
+            raise BeallitasHiba("Nincs jelszo (--password vagy QBT_PASSWORD).")
+        password = getpass.getpass(f"qBittorrent jelszo ({args.user}): ")
+    return password
+
+
+def _lekerdezes(
+    client: QbtClient, futas: _Futas, pontos: bool,
+) -> tuple[str, list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Bejelentkezes, torrentek, es (ha kell) a fajllistak lekerese."""
+    client.login()
+    version = client.version()
+    torrents = client.torrents()
+    files_by_hash: dict[str, list[dict[str, Any]]] = {}
+    if pontos:
+        kellenek = erintett_torrentek(torrents, futas.targets, futas.beallitas)
+        if kellenek:
+            print(f"Fajllista lekerese {len(kellenek)} torrenthez "
+                  f"({len(torrents) - len(kellenek)} mas konyvtarban van)...")
+            files_by_hash = client.files_many(kellenek)
+    return version, torrents, files_by_hash
+
+
+def _torlesek(candidates: Sequence[Candidate], futas: _Futas,
+              naplo: qbt_naplo.TorlesNaplo | None) -> tuple[int, int]:
+    """A tenyleges torles. Visszaadja: (felszabadult bajt, sikertelen darab)."""
+    freed = 0
+    failed = 0
+    for cand in candidates:
+        gazda = owner_target(cand.path, futas.targets)
+        ok, message = remove_entry(cand, gazda, futas.trash_dir)
+        if ok:
+            freed += cand.size
         else:
-            print("Nincs jelszo (--password vagy QBT_PASSWORD).", file=sys.stderr)
-            return 2
+            failed += 1
+        if naplo:
+            naplo.rogzit(cand, ok, message, kukaba=bool(futas.trash_dir))
+        print(f"  {human(cand.size):>10}  {cand.path}  ({message})")
+    return freed, failed
 
-    client = QbtClient(args.url, args.user, password, args.timeout, args.insecure)
-    try:
-        client.login()
-        version = client.version()
-        torrents = client.torrents()
-        files_by_hash: dict[str, list[dict[str, Any]]] = {}
-        if args.mod == "fa" and args.pontos:
-            for torrent in torrents:
-                thash = torrent.get("hash") or ""
-                if thash:
-                    files_by_hash[thash] = client.files(thash)
-    except QbtError as exc:
-        print(f"Hiba: {exc}", file=sys.stderr)
-        print("Semmit nem toroltem.", file=sys.stderr)
-        return 1
 
+def _figyelmeztetesek(gondok: Sequence[str]) -> None:
+    if not gondok:
+        return
+    print()
+    print(f"Figyelem: {len(gondok)} konyvtarat nem tudtam beolvasni - "
+          "ezekben nem takaritottam:", file=sys.stderr)
+    for gond in gondok[:MUTATOTT_RESZLET]:
+        print(f"  {gond}", file=sys.stderr)
+    if len(gondok) > MUTATOTT_RESZLET:
+        print(f"  ... es meg {len(gondok) - MUTATOTT_RESZLET}.",
+              file=sys.stderr)
+
+
+def _esemenynaplo_indul(args: argparse.Namespace, pontos: bool) -> None:
+    """Az esemenynaplo bekapcsolasa a torlesi naplo melle.
+
+    Utemezve futtatva (Feladatutemezo) a kepernyore irt uzenetek elvesznek -
+    ez az egyetlen nyom arrol, hogy a takaritas egyaltalan elindult-e, es hol
+    allt meg.
+
+    A parancssort SZANDEKOSAN nem irjuk bele, csak a lenyeget: a --password
+    ott lehet benne, es a naplo nem valo jelszotarnak."""
+    if args.no_naplo:
+        return
+    hova = (Path(args.naplo).parent / qbt_naplo.ESEMENY_NEV
+            if args.naplo else None)
+    qbt_naplo.esemenyek_indul(hova)
+    qbt_naplo.jegyzet("indul: qbt_cleanup %s (mod: %s%s, %s, %d konyvtar)",
+                      __version__, args.mod, ", pontos" if pontos else "",
+                      "torol" if args.torol else "proba",
+                      len(args.konyvtarak))
+
+
+def _figyelmeztet_kapcsolokra(args: argparse.Namespace, pontos: bool) -> None:
+    """A csendben hatastalan kapcsolokra kulon szolunk: kulonben a felhasznalo
+    azt hinne, hogy hatott."""
+    if args.pontos and not pontos:
+        print("Figyelem: a --pontos csak a 'fa' modban szamit, most nem "
+              "hasznalom.", file=sys.stderr)
+    if args.utvonal and args.mod != Mod.FA:
+        print("Figyelem: az --utvonal csak a 'fa' modban szamit.",
+              file=sys.stderr)
+
+
+def _fejlec(client: QbtClient, version: str, torrents: Sequence[Torrent],
+            futas: _Futas, pontos: bool) -> None:
     print(f"qBittorrent {version} ({client.base}) - {len(torrents)} torrent")
-    pontos_jelzo = " (pontos)" if args.pontos and args.mod == "fa" else ""
-    print(f"Uzemmod: {args.mod}{pontos_jelzo}")
-    for target in targets:
+    print(f"Uzemmod: {futas.beallitas.mode}{' (pontos)' if pontos else ''}")
+    for target in futas.targets:
         print(f"Vizsgalt konyvtar: {target}")
 
-    def note(target: Path, count: int) -> None:
-        print(f"A(z) {target} alatt talalt torrent-elemek: {count}")
 
+def _atnezes(torrents: Sequence[Torrent],
+             files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+             futas: _Futas) -> list[Candidate]:
+    """A konyvtarak atnezese, a menet kozbeni gondok kiirasaval."""
     gondok: list[str] = []
+    figyelo = Figyelo(
+        on_note=lambda cel, db: print(
+            f"A(z) {cel} alatt talalt torrent-elemek: {db}"),
+        on_warn=gondok.append,
+    )
+    candidates = plan_all(torrents, files_by_hash, futas.targets,
+                          futas.beallitas, figyelo)
+    _figyelmeztetesek(gondok)
+    return candidates
 
-    try:
-        candidates = plan_all(
-            torrents, files_by_hash, targets, args.mod, maps, excludes,
-            ignore_case, args.min_age,
-            extra_protected=[trash_dir] if trash_dir else (),
-            allow_empty=args.allow_empty, on_note=note, on_warn=gondok.append)
-    except SafetyStop as exc:
-        print()
-        print(f"{exc} Ha tenyleg ezt akarod: --ures-lista-ok", file=sys.stderr)
-        return 2
-    except QbtError as exc:
-        print(f"Hiba: {exc}", file=sys.stderr)
-        print("Semmit nem toroltem.", file=sys.stderr)
-        return 1
 
-    if gondok:
-        print()
-        print(f"Figyelem: {len(gondok)} konyvtarat nem tudtam beolvasni - "
-              "ezekben nem takaritottam:", file=sys.stderr)
-        for gond in gondok[:10]:
-            print(f"  {gond}", file=sys.stderr)
-        if len(gondok) > 10:
-            print(f"  ... es meg {len(gondok) - 10}.", file=sys.stderr)
-
-    total = sum(c.size for c in candidates)
-    print()
-    if not candidates:
-        print("Nincs felesleges elem - nincs mit tenni.")
-        return 0
-
+def _lista_kiirasa(candidates: Sequence[Candidate], total: int) -> None:
     print(f"Felesleges elemek ({len(candidates)} db, {human(total)}):")
     for cand in candidates:
         print(f"  [{'D' if cand.is_dir else 'F'}] {human(cand.size):>10}  "
               f"{cand.path}")
 
-    if not args.torol:
-        print()
-        print("Ez csak proba volt, semmit nem toroltem. "
-              "Tenyleges torleshez tedd hozza: --torol")
-        return 0
 
+def _torles_szakasz(args: argparse.Namespace, futas: _Futas,
+                    candidates: Sequence[Candidate], total: int) -> int:
+    """A tenyleges torles: fekek, megerosites, naplo, vegrehajtas."""
     if args.max_delete and len(candidates) > args.max_delete:
         print()
         print(f"Tobb elemet torolne ({len(candidates)}), mint a megadott hatar "
@@ -1152,7 +1531,7 @@ def _main(argv: Sequence[str] | None) -> int:
             print("Nem interaktiv futas: a torleshez --igen kell.",
                   file=sys.stderr)
             return 2
-        if not confirm(len(candidates), total, trash_dir):
+        if not confirm(len(candidates), total, futas.trash_dir):
             print("Megsem toroltem semmit.")
             return 0
 
@@ -1161,32 +1540,68 @@ def _main(argv: Sequence[str] | None) -> int:
         naplo = qbt_naplo.nyitas(args.naplo,
                                  int(args.naplo_meret * 1024 * 1024),
                                  args.naplo_tartas)
-
     print()
-    freed = 0
-    failed = 0
     try:
-        for cand in candidates:
-            ok, message = remove_entry(cand, owner_target(cand.path, targets),
-                                       trash_dir)
-            if ok:
-                freed += cand.size
-            else:
-                failed += 1
-            if naplo:
-                naplo.rogzit(cand, ok, message, kukaba=bool(trash_dir))
-            print(f"  {human(cand.size):>10}  {cand.path}  ({message})")
+        freed, failed = _torlesek(candidates, futas, naplo)
     finally:
         if naplo:
             naplo.close()
 
     print()
+    qbt_naplo.jegyzet("kesz: %d elem torolve, %s felszabadulva, %d sikertelen",
+                      len(candidates) - failed, human(freed), failed)
     maradt = f"  {failed} elem sikertelen!" if failed else ""
     print(f"Kesz: {len(candidates) - failed} elem, {human(freed)} "
           f"felszabadulva.{maradt}")
     if naplo:
         print(f"A torlesek naploja: {naplo.path}")
     return 1 if failed else 0
+
+
+def _main(argv: Sequence[str] | None) -> int:
+    _utf8_kimenet()
+
+    args = build_parser().parse_args(argv)
+    pontos = args.pontos and args.mod == Mod.FA
+    _esemenynaplo_indul(args, pontos)
+    _figyelmeztet_kapcsolokra(args, pontos)
+
+    try:
+        futas = _elokeszites(args)
+        client = QbtClient(args.url, args.user, _jelszo(args), futas.halozat)
+        version, torrents, files_by_hash = _lekerdezes(client, futas, pontos)
+        _fejlec(client, version, torrents, futas, pontos)
+        candidates = _atnezes(torrents, files_by_hash, futas)
+    except (BeallitasHiba, ValueError) as exc:   # a keressel van baj
+        print(str(exc), file=sys.stderr)
+        return 2
+    except SafetyStop as exc:                    # a biztonsagi fek fogott
+        qbt_naplo.jegyzet("biztonsagi fek: %s", exc)
+        print()
+        print(f"{exc} Ha tenyleg ezt akarod: --ures-lista-ok", file=sys.stderr)
+        return 2
+    except QbtError as exc:                      # halozat vagy fajlrendszer
+        qbt_naplo.jegyzet("a takaritas megallt: %s", exc)
+        print(f"Hiba: {exc}", file=sys.stderr)
+        print("Semmit nem toroltem.", file=sys.stderr)
+        return 1
+
+    total = sum(c.size for c in candidates)
+    qbt_naplo.jegyzet("atnezve: %d torrent, %d felesleges elem (%s)",
+                      len(torrents), len(candidates), human(total))
+    print()
+    if not candidates:
+        print("Nincs felesleges elem - nincs mit tenni.")
+        return 0
+
+    _lista_kiirasa(candidates, total)
+    if not args.torol:
+        print()
+        print("Ez csak proba volt, semmit nem toroltem. "
+              "Tenyleges torleshez tedd hozza: --torol")
+        return 0
+
+    return _torles_szakasz(args, futas, candidates, total)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1197,10 +1612,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         return _main(argv)
-    except KeyboardInterrupt:  # pragma: no cover - kezi megszakitas
+    except (KeyboardInterrupt, Megszakitva):  # pragma: no cover - kezi leallitas
+        qbt_naplo.jegyzet("megszakitva")
         print("\nMegszakitva. A hatralevo elemekhez nem nyultam.",
               file=sys.stderr)
         return 130
+    finally:
+        qbt_naplo.esemenyek_lezar()
 
 
 if __name__ == "__main__":

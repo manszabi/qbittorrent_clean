@@ -106,9 +106,32 @@ check("es kiirja a hibat", "[HIBA]" in kiirt, True)
 # --- teljes ellenorzes ------------------------------------------------------
 
 indit._futtat = lambda parancs: True
+
+# A tkinter megletet szandekosan nem a futtato gepre bizzuk: van, ahol a
+# python3-tk nincs telepitve, es akkor a teszt a program helyett a gepet
+# minositene. Magat az ellenorzest fentebb, kulon vizsgaljuk.
+regi_hianyzo = indit.hianyzo_modulok
+indit.hianyzo_modulok = lambda modulok=None: []
+
 eredmeny, kiirt = csendben(indit.ellenorzes)
 check("a repoban minden fuggoseg megvan", eredmeny, True)
 check("a program fajljait is megnezi", "program fajljai" in kiirt, True)
+
+# hianyzo tkinter: ertheto uzenet, es a parancssoros valtozat ajanlasa
+indit.hianyzo_modulok = lambda modulok=None: (["tkinter"]
+                                              if modulok == ["tkinter"] else [])
+eredmeny, kiirt = csendben(indit.ellenorzes)
+check("hianyzo tkinter eseten leall", eredmeny, False)
+check("es megmondja, mit kell telepiteni", "tcl/tk" in kiirt, True)
+check("es ajanlja a parancssoros valtozatot", "qbt_takaritas.bat" in kiirt, True)
+
+# hianyzo alap modul: mas uzenet
+indit.hianyzo_modulok = lambda modulok=None: (["json"] if modulok is None else [])
+eredmeny, kiirt = csendben(indit.ellenorzes)
+check("hianyzo alap modul eseten is leall", eredmeny, False)
+check("es a Python ujratelepiteset javasolja", "Telepitsd ujra" in kiirt, True)
+
+indit.hianyzo_modulok = lambda modulok=None: []
 
 regi_itt = indit.ITT
 indit.ITT = str(tmp)  # itt nincs se qbt_gui.py, se qbt_cleanup.py
@@ -119,6 +142,7 @@ indit.ITT = regi_itt
 
 eredmeny, kiirt = csendben(indit.main, indit=False)
 check("main indites nelkul: rendben", eredmeny, 0)
+indit.hianyzo_modulok = regi_hianyzo
 
 shutil.rmtree(str(tmp), ignore_errors=True)
 

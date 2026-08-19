@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gzip
+import os
 import shutil
 import tempfile
 import time
@@ -14,6 +15,10 @@ from datetime import datetime
 
 import qbt_cleanup as q
 import qbt_naplo
+
+# A naplok alapertelmezett helye a felhasznalo allapot-konyvtara. A teszt ne
+# irjon oda: sajat, ideiglenes helyre iranyitjuk at.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="qbt-teszt-allapot-")
 
 fail = 0
 
@@ -184,6 +189,45 @@ finally:
     sys.stderr = regi_err
 check("nem irhato helyen nem szall el", rossz, None)
 check_true("de szol rola", "naplot nem tudom megnyitni" in kiirt, kiirt)
+
+# --------------------------------------------------------- esemenynaplo
+#
+# Ez nem konyveles, hanem hibakereses: a felulet es az utemezett futas
+# egyetlen nyoma egy baj utan.
+
+esemeny_ut = tmp / "esemenyek" / "esemenyek.log"
+check("naplo nelkul a jegyzet nem szall el", qbt_naplo.jegyzet("semmi"), None)
+check("bekapcsolas visszaadja a fajlt", qbt_naplo.esemenyek_indul(esemeny_ut),
+      esemeny_ut)
+check("masodik bekapcsolas nem nyit ujabbat",
+      qbt_naplo.esemenyek_indul(tmp / "mashol.log"), esemeny_ut)
+qbt_naplo.jegyzet("proba: %d elem, %s", 3, "kesz")
+sorok = esemeny_ut.read_text(encoding="utf-8").splitlines()
+check("egy sor keszult", len(sorok), 1)
+check_true("a sor vegen ott az uzenet", sorok[0].endswith("proba: 3 elem, kesz"),
+           sorok)
+check_true("es az elejen az ido", sorok[0][:4].isdigit(), sorok)
+
+# rotalas: a merethatart atlepve uj fajlt kezd, a regit megtartja
+qbt_naplo.esemenyek_lezar()
+regi_meret = qbt_naplo.ESEMENY_MERET
+qbt_naplo.ESEMENY_MERET = 200
+try:
+    qbt_naplo.esemenyek_indul(esemeny_ut)
+    for i in range(40):
+        qbt_naplo.jegyzet("hosszu sor a rotalas kikenyszeritesehez %d", i)
+finally:
+    qbt_naplo.esemenyek_lezar()
+    qbt_naplo.ESEMENY_MERET = regi_meret
+check_true("az esemenynaplo is rotalodik",
+           (esemeny_ut.parent / "esemenyek.log.1").exists(),
+           sorted(x.name for x in esemeny_ut.parent.iterdir()))
+check_true("es nem no korlatlanul",
+           esemeny_ut.stat().st_size <= 400, esemeny_ut.stat().st_size)
+
+check("lezaras utan a jegyzet megint csendes", qbt_naplo.jegyzet("semmi"), None)
+check("nem irhato helyen sem szall el",
+      qbt_naplo.esemenyek_indul(akadaly / "esemenyek.log"), None)
 
 shutil.rmtree(str(tmp), ignore_errors=True)
 
