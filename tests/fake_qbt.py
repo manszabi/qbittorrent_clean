@@ -1,12 +1,16 @@
 """Hamis qBittorrent WebUI es proba-konyvtarfa - a tesztek kozos kelleke.
 
 Igy a motor (qbt_test.py) es a felulet (gui_test.py) ugyanazt a kiszolgalot es
-ugyanazt a konyvtarfat hasznalja."""
+ugyanazt a konyvtarfat hasznalja.
+
+A kiszolgalo szandekosan tud rosszul is viselkedni (atmeneti hiba, lejart
+munkamenet, lassu valasz): a hibaturest csak igy lehet merni."""
 
 import json
 import threading
+import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 USER, PASSWORD = "admin", "titok123"
@@ -24,18 +28,48 @@ TORRENTS = [
      "content_path": "/downloads/rss/hetivideo.mkv"},
 ]
 
+# A WebUI valaszanak alakja (a valodi API tobb mezot kuld, de a program csak a
+# nevet hasznalja - lasd QbtClient.fajlnevek).
 FILES = {
     "aaa": [{"name": "Film.Egy.2024/film.mkv"}, {"name": "Film.Egy.2024/film.srt"}],
     "bbb": [{"name": "Sorozat S01/e01.mkv"}, {"name": "Sorozat S01/e02.mkv"}],
     "ccc": [{"name": "hetivideo.mkv"}],
 }
 
+# Ugyanez abban az alakban, ahogy a motor varja (csak a nevek).
+FAJLNEVEK = {h: [f["name"] for f in lista] for h, lista in FILES.items()}
 
-def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
+
+class Viselkedes:
+    """A hamis kiszolgalo szeszelyei.
+
+    A teszt beallitja, mi tortenjen a kovetkezo hivasoknal (atmeneti hiba,
+    lejart munkamenet, lassu valasz), a szamlalokbol pedig utana leolvashato,
+    mi tortent valojaban."""
+
+    def __init__(self):
+        self.atmeneti_hibak = 0     # ennyi kovetkezo GET-re 503 a valasz
+        self.retry_after = None     # a 503 melle kuldott Retry-After fejlec
+        self.lejart_munkamenet = 0  # ennyi kovetkezo GET-re 403, es kilep
+        self.keses = 0.0            # a fajllista-lekeres ennyit varjon (mp)
+        self.fajl_hivasok = 0
+        self.belepesek = 0
+        self.egyszerre = 0          # eppen hany fajllista-lekeres fut
+        self.egyszerre_csucs = 0    # ebbol latszik, hogy tenyleg parhuzamos
+        self.zar = threading.Lock()
+
+
+def start_server(torrents=None, files=None, user=USER, password=PASSWORD,
+                 viselkedes=None):
     """Elindit egy hamis WebUI-t a helyi gepen. Visszaadja: (url, kiszolgalo).
-    A vegen kiszolgalo.shutdown() illik."""
+    A vegen kiszolgalo.shutdown() illik.
+
+    Szalankent kulon szolgalja ki a kereseket, kulonben a parhuzamos
+    lekerdezes merese ertelmetlen lenne: a sorbaallas maga tuntetne el a
+    kulonbseget."""
     torrents = TORRENTS if torrents is None else torrents
     files = FILES if files is None else files
+    allapot = viselkedes or Viselkedes()
 
     class Handler(BaseHTTPRequestHandler):
         logged_in = False
@@ -43,13 +77,33 @@ def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
         def log_message(self, *a):  # csendben
             pass
 
-        def _send(self, code, body, ctype="text/plain; charset=UTF-8"):
+        def _send(self, code, body, ctype="text/plain; charset=UTF-8",
+                  fejlecek=()):
             data = body.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            for nev, ertek in fejlecek:
+                self.send_header(nev, ertek)
             self.end_headers()
             self.wfile.write(data)
+
+        def _szandekos_hiba(self):
+            """Ha ez a keres szandekosan elszall, kikuldi a valaszt, es igazat
+            ad vissza."""
+            with allapot.zar:
+                if allapot.lejart_munkamenet > 0:
+                    allapot.lejart_munkamenet -= 1
+                    Handler.logged_in = False  # ujra be kell jelentkezni
+                    self._send(403, "Forbidden")
+                    return True
+                if allapot.atmeneti_hibak > 0:
+                    allapot.atmeneti_hibak -= 1
+                    fejlecek = ([("Retry-After", str(allapot.retry_after))]
+                                if allapot.retry_after is not None else ())
+                    self._send(503, "Service Unavailable", fejlecek=fejlecek)
+                    return True
+            return False
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
@@ -57,6 +111,8 @@ def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
             if self.path == "/api/v2/auth/login":
                 ok = (form.get("username", [""])[0] == user
                       and form.get("password", [""])[0] == password)
+                with allapot.zar:
+                    allapot.belepesek += 1
                 if ok:
                     Handler.logged_in = True
                     self.send_response(200)
@@ -71,6 +127,8 @@ def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
+            if self._szandekos_hiba():
+                return
             if not Handler.logged_in:
                 self._send(403, "Forbidden")
                 return
@@ -79,13 +137,29 @@ def start_server(torrents=None, files=None, user=USER, password=PASSWORD):
             elif parsed.path == "/api/v2/torrents/info":
                 self._send(200, json.dumps(torrents), "application/json")
             elif parsed.path == "/api/v2/torrents/files":
-                qs = urllib.parse.parse_qs(parsed.query)
-                self._send(200, json.dumps(files.get(qs.get("hash", [""])[0], [])),
-                           "application/json")
+                self._fajllista(parsed)
             else:
                 self._send(404, "nincs ilyen")
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+        def _fajllista(self, parsed):
+            with allapot.zar:
+                allapot.fajl_hivasok += 1
+                allapot.egyszerre += 1
+                allapot.egyszerre_csucs = max(allapot.egyszerre_csucs,
+                                              allapot.egyszerre)
+            try:
+                if allapot.keses:
+                    time.sleep(allapot.keses)
+                qs = urllib.parse.parse_qs(parsed.query)
+                self._send(200,
+                           json.dumps(files.get(qs.get("hash", [""])[0], [])),
+                           "application/json")
+            finally:
+                with allapot.zar:
+                    allapot.egyszerre -= 1
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{server.server_address[1]}", server
 

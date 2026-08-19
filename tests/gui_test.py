@@ -20,6 +20,10 @@ from fake_qbt import PASSWORD, USER, build_tree, start_server
 
 import qbt_gui
 
+# A naplok alapertelmezett helye a felhasznalo allapot-konyvtara. A teszt ne
+# irjon oda: sajat, ideiglenes helyre iranyitjuk at.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="qbt-teszt-allapot-")
+
 fail = 0
 
 
@@ -346,6 +350,96 @@ app.beallitasok_betoltese()
 check("olvashatatlan beallitas-fajlt is elvisel", app.v_mod.get(), "felso")
 beallitas.write_text(elmentett, encoding="utf-8")
 app.beallitasok_betoltese()
+
+# --- gyoker-konyvtar nelkuli torrent ----------------------------------------
+#
+# A qBittorrent "ne hozzon letre almappat" elrendezesenel a torrent fajljai
+# kozvetlenul a mentesi konyvtarban vannak. A felulet ilyenkor is le kell
+# kerje a fajllistat, kulonben a seedelt fajlokat feleslegesnek latna.
+
+g_mappa = tmp / "gyokertelen"
+g_mappa.mkdir()
+(g_mappa / "elso.mkv").write_bytes(b"1" * 16)
+(g_mappa / "masodik.mkv").write_bytes(b"2" * 16)
+(g_mappa / "szemet.mkv").write_bytes(b"3" * 16)
+g_torrentek = [{"hash": "ggg", "name": "Ket.Fajl.Csomag",
+                "save_path": str(g_mappa), "download_path": "",
+                "content_path": str(g_mappa)}]
+g_url, g_server = start_server(torrents=g_torrentek,
+                               files={"ggg": [{"name": "elso.mkv"},
+                                              {"name": "masodik.mkv"}]})
+regi_url = app.v_url.get()
+app.v_url.set(g_url)
+app.lista_kony.delete(0, "end")
+app._konyvtar_felvesz(str(g_mappa))
+parbeszed.hibak = []
+app.vizsgalat()
+check_true("gyokertelen torrent: a vizsgalat lefutott",
+           varakozas(lambda: not app.dolgozik), app.v_allapot.get())
+check("es csak a valoban felesleges elemet ajanlja torlesre", nevek(),
+      ["szemet.mkv"])
+check("a torrent fajljai nem kerultek a listara", parbeszed.hibak, [])
+g_server.shutdown()
+app.v_url.set(regi_url)
+app.lista_kony.delete(0, "end")
+app._konyvtar_felvesz(str(share))
+app._konyvtar_felvesz(str(rss))
+app._elemek_kiirasa([])
+shutil.rmtree(str(g_mappa))
+
+# --- a talalati lista adagolt feltoltese ------------------------------------
+#
+# Egy nagy megosztason tizezer sor is johet. Egyszerre kiteve az ablak
+# masodpercekre megallna, ezert adagokban tesszuk ki oket.
+
+sok = [qbt_gui.engine.Candidate(share / f"p{i:05d}.mkv", False, i)
+       for i in range(qbt_gui.BETOLTES_ADAG * 2 + 7)]
+app._elemek_kiirasa(sok)
+check("elsore csak az elso adag kerul ki", len(app.fa.get_children()),
+      qbt_gui.BETOLTES_ADAG)
+kesz = []
+app._elemek_kiirasa(sok, keszen=lambda: kesz.append(True))
+check_true("a tobbi adagokban toltodik be", varakozas(lambda: kesz))
+check("a vegen minden sor a helyen van", len(app.fa.get_children()), len(sok))
+check("es a sorok az elemekre mutatnak", len(app.sor_index), len(sok))
+app._elemek_kiirasa([])
+
+# --- megszakitas ------------------------------------------------------------
+
+regi_plan_lassu = qbt_gui.engine.plan_all
+
+
+def lassu_plan(torrentek, fajlok, konyvtarak, beallitas, figyelo):
+    """Sokaig tarto atnezes utanzata - kozben figyeli a megszakitast."""
+    for _ in range(500):
+        figyelo.ellenoriz()
+        time.sleep(0.01)
+    return []
+
+
+qbt_gui.engine.plan_all = lassu_plan
+app.vizsgalat()
+check("munka kozben a megszakitas gomb elerheto", str(app.b_megall["state"]),
+      "normal")
+app.megszakitas()
+check_true("megszakitasra leall a vizsgalat",
+           varakozas(lambda: not app.dolgozik), app.v_allapot.get())
+check_true("es meg is mondja", "Megszakítva" in app.v_allapot.get(),
+           app.v_allapot.get())
+check("utana a megszakitas gomb ujra tiltott", str(app.b_megall["state"]),
+      "disabled")
+qbt_gui.engine.plan_all = regi_plan_lassu
+
+# a torles ket elem kozott all meg: amihez nem nyultunk, az megmarad
+(share / "megmarad.mkv").write_bytes(b"m" * 32)
+jelolt = qbt_gui.engine.Candidate(share / "megmarad.mkv", False, 32)
+app.megallj.set()
+valasz = app._torles_szal([0], [jelolt], [share], None, None)
+app.megallj.clear()
+check("megszakitva egyetlen elemet sem torol", valasz[1], set())
+check("es jelzi, hogy megszakadt", valasz[4], True)
+check("a fajl a helyen maradt", (share / "megmarad.mkv").exists(), True)
+(share / "megmarad.mkv").unlink()
 
 # --- varatlan hiba a hatterszalban --------------------------------------------
 #

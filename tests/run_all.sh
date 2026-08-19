@@ -36,6 +36,8 @@ run "indito (indit.py)"      $PY indit_test.py
 run "motor (qbt_cleanup.py)" $PY qbt_test.py
 run "torlesi naplo (qbt_naplo.py)" $PY naplo_test.py
 run "felulet (qbt_gui.py)"   $GUI gui_test.py
+run "windows-specifikus"     $PY windows_test.py
+run "terheles es meresek"    $PY terheles_test.py
 
 echo
 if [ "$fail" -eq 0 ]; then echo "MINDEN TESZT SIKERES"; else echo "VOLT HIBA"; fi

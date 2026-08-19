@@ -22,7 +22,8 @@ MIN_VERZIO = (3, 10)
 
 # A program ezeket hasznalja a Python szabvany konyvtarabol.
 ALAP_MODULOK = ["json", "ssl", "shutil", "urllib.request", "http.cookiejar",
-                "unicodedata", "dataclasses", "argparse", "logging", "gzip"]
+                "unicodedata", "dataclasses", "argparse", "logging", "gzip",
+                "threading", "concurrent.futures", "enum"]
 
 ITT = os.path.dirname(os.path.abspath(__file__))
 

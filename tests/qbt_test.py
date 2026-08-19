@@ -6,17 +6,34 @@ from pathlib import Path
 # A vizsgalt program a repo gyokereben van.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import email.message
 import io
 import os
 import shutil
 import stat
 import tempfile
+import threading
+import time
 import unicodedata
+import urllib.error
 from pathlib import Path
 
-from fake_qbt import FILES, PASSWORD, TORRENTS, USER, build_tree, start_server
+from fake_qbt import (
+    FAJLNEVEK,
+    FILES,
+    PASSWORD,
+    TORRENTS,
+    USER,
+    Viselkedes,
+    build_tree,
+    start_server,
+)
 
 import qbt_cleanup as q
+
+# A naplok alapertelmezett helye a felhasznalo allapot-konyvtara. A teszt ne
+# irjon oda: sajat, ideiglenes helyre iranyitjuk at.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="qbt-teszt-allapot-")
 
 fail = 0
 
@@ -137,26 +154,165 @@ check("kesz_kulcs: mast nem bant", q.kesz_kulcs(q.norm_key("Film.mkv")), "film.m
 
 # --------------------------------------------------------- WebUI kliens
 
-bad = q.QbtClient(URL, USER, "rossz jelszo", timeout=5)
+bad = q.QbtClient(URL, USER, "rossz jelszo", q.Halozat(timeout=5))
 try:
     bad.login()
     check("rossz jelszo", "nem dobott hibat", "QbtError")
 except q.QbtError as exc:
     check_true("rossz jelszo -> QbtError", "bejelentkezes" in str(exc).lower(), exc)
 
-client = q.QbtClient(URL, USER, PASSWORD, timeout=5)
+client = q.QbtClient(URL, USER, PASSWORD, q.Halozat(timeout=5))
 client.login()
 check("app/version", client.version(), "v4.6.5")
 check("torrents/info darabszam", len(client.torrents()), 3)
 check("torrents/files", [f["name"] for f in client.files("aaa")],
       ["Film.Egy.2024/film.mkv", "Film.Egy.2024/film.srt"])
+check("torrents/files: a nyers valasz alakja megmarad", client.files("aaa"),
+      FILES["aaa"])
+check("fajlnevek: csak a nevek (500x200 fajlnal 48 MB helyett 10 MB)",
+      client.fajlnevek("aaa"), FAJLNEVEK["aaa"])
 
-dead = q.QbtClient("http://127.0.0.1:1", "a", "b", timeout=2)
+dead = q.QbtClient("http://127.0.0.1:1", "a", "b",
+                    q.Halozat(timeout=2, probak=1))
 try:
     dead.login()
     check("elerhetetlen kiszolgalo", "nem dobott hibat", "QbtError")
 except q.QbtError:
     check("elerhetetlen kiszolgalo", "QbtError", "QbtError")
+
+# --------------------------------------------- hibatures: ujraprobalkozas
+#
+# Egy atmeneti hiba (a NAS eppen ebred, a WebUI ujraindul, a halozat akad) ne
+# buktassa el az egesz takaritast.
+
+viselkedes = Viselkedes()
+URL2, server2 = start_server(viselkedes=viselkedes)
+kliens2 = q.QbtClient(URL2, USER, PASSWORD, q.Halozat(timeout=5, probak=3))
+kliens2.login()
+
+viselkedes.atmeneti_hibak = 2
+check("ket atmeneti hiba (503) utan is megjon a valasz",
+      kliens2.version(), "v4.6.5")
+check("mindket hibat elhasznalta", viselkedes.atmeneti_hibak, 0)
+
+viselkedes.atmeneti_hibak = 5
+try:
+    kliens2.version()
+    check("ha vegig hibas, feladja", "nem dobott hibat", "QbtError")
+except q.QbtError as exc:
+    check_true("ha vegig hibas, feladja", "probalkozas utan" in str(exc), exc)
+viselkedes.atmeneti_hibak = 0
+
+egy_probas = q.QbtClient(URL2, USER, PASSWORD, q.Halozat(timeout=5, probak=1))
+egy_probas.login()
+viselkedes.atmeneti_hibak = 1
+try:
+    egy_probas.version()
+    check("--probak 1: nincs ujraprobalkozas", "nem dobott hibat", "QbtError")
+except q.QbtError:
+    check("--probak 1: nincs ujraprobalkozas", "QbtError", "QbtError")
+viselkedes.atmeneti_hibak = 0
+
+
+def hiba_fejleccel(ertek):
+    fejlec = email.message.Message()
+    if ertek is not None:
+        fejlec["Retry-After"] = ertek
+    return urllib.error.HTTPError(URL2, 503, "hiba", fejlec, None)
+
+
+check("Retry-After: az erteket elfogadja",
+      q.QbtClient._varakozas(hiba_fejleccel("2"), 0), 2.0)
+check("Retry-After: a tulzast levagja",
+      q.QbtClient._varakozas(hiba_fejleccel("3600"), 0), float(q.MAX_RETRY_AFTER))
+check("Retry-After nelkul duplazodo varakozas",
+      q.QbtClient._varakozas(hiba_fejleccel(None), 1), q.PROBA_SZUNET * 2)
+check("datum alaku Retry-After sem zavarja meg",
+      q.QbtClient._varakozas(hiba_fejleccel("Wed, 21 Oct 2026 07:28:00 GMT"), 0),
+      q.PROBA_SZUNET)
+
+# --- lejart munkamenet: ujra bejelentkezik, nem all le
+belepesek = viselkedes.belepesek
+viselkedes.lejart_munkamenet = 1
+check("lejart munkamenet utan is megvannak a torrentek",
+      len(kliens2.torrents()), 3)
+check("mert kozben ujra bejelentkezett", viselkedes.belepesek, belepesek + 1)
+
+# --- fajllistak parhuzamos lekerese
+viselkedes.keses = 0.15
+hashek = [f"h{i}" for i in range(8)]
+kezdet = time.monotonic()
+eredmeny = kliens2.files_many(hashek)
+egyutt = time.monotonic() - kezdet
+check("minden torrenthez van valasz", sorted(eredmeny), sorted(hashek))
+check_true("valoban parhuzamosan kerdez", viselkedes.egyszerre_csucs > 1,
+           f"csucs={viselkedes.egyszerre_csucs}")
+check_true("igy toredek ido alatt kesz",
+           egyutt < len(hashek) * viselkedes.keses / 2,
+           f"{egyutt:.2f} mp, sorban {len(hashek) * viselkedes.keses:.2f} mp lenne")
+
+haladas = []
+kliens2.files_many(["aaa", "bbb"], on_progress=lambda k, o: haladas.append((k, o)))
+check("a haladasrol jelez", haladas, [(1, 2), (2, 2)])
+
+try:
+    kliens2.files_many(hashek, megszakitva=lambda: True)
+    check("megszakitas a fajllista-lekeres kozben", "nem allt le", "Megszakitva")
+except q.Megszakitva:
+    check("megszakitas a fajllista-lekeres kozben", "Megszakitva", "Megszakitva")
+viselkedes.keses = 0.0
+
+check("ures lista eseten hivas sincs", kliens2.files_many([]), {})
+
+# --- ujrabelepes: egyszerre erkezo szalak kozul csak egy lepjen be
+belepo = q.QbtClient(URL2, USER, PASSWORD, q.Halozat(timeout=5))
+belepo.login()
+hivasok = []
+tovabb = threading.Event()
+
+
+def lassu_login():
+    """Az elso szal bent ragad a belepesben, amig a tobbi be nem all a zarra."""
+    hivasok.append(1)
+    tovabb.wait(3)
+
+
+belepo.login = lassu_login
+elso = threading.Thread(target=belepo._ujra_belep)
+elso.start()
+while not hivasok:
+    time.sleep(0.01)
+tobbi = [threading.Thread(target=belepo._ujra_belep) for _ in range(3)]
+for szal in tobbi:
+    szal.start()
+time.sleep(0.15)   # allitsuk be oket a zarra
+tovabb.set()
+for szal in (elso, *tobbi):
+    szal.join(3)
+check("egyszerre erkezo szalak kozul csak egy lep be ujra", len(hivasok), 1)
+
+# --- a varakozas is megszakithato
+megszakito_kliens = q.QbtClient(URL2, USER, PASSWORD,
+                                q.Halozat(timeout=5, probak=4))
+megszakito_kliens.megszakitva = lambda: True
+viselkedes.atmeneti_hibak = 4
+kezdet = time.monotonic()
+try:
+    megszakito_kliens.version()
+    check("az ujraprobalkozas varakozasa megszakithato", "nem allt le",
+          "Megszakitva")
+except q.Megszakitva:
+    check("az ujraprobalkozas varakozasa megszakithato", "Megszakitva",
+          "Megszakitva")
+eltelt = time.monotonic() - kezdet
+check_true("es nem varja vegig a szunetet", eltelt < 0.5, f"{eltelt:.2f} mp")
+viselkedes.atmeneti_hibak = 0
+megszakito_kliens.megszakitva = None
+check("megszakitas nelkul viszont vegigvar",
+      megszakito_kliens._var(0.05), None)
+check("es a hivas is lefut", megszakito_kliens.version(), "v4.6.5")
+
+server2.shutdown()
 
 # ------------------------------------------------------- proba-konyvtarfa
 
@@ -165,12 +321,17 @@ def names_of(cands, base):
                   for c in cands)
 
 
+def T(protected=(), on_warn=None, **kw):
+    """Egy atnezesi terv a tesztekhez: a Beallitas mezoi kulcsszokent johetnek."""
+    return q._Terv.keszit(q.Beallitas(**kw), protected, q.Figyelo(on_warn=on_warn))
+
+
 tmp = Path(tempfile.mkdtemp(prefix="qbt-teszt-"))
 share, rss = build_tree(tmp)
 
 # --- 'felso' mod: nevek alapjan, a ket konyvtar vedi egymast
 names = q.owned_names(TORRENTS)
-cands = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES, protected=[rss])
+cands = q.plan_toplevel(share, names, T(protected=[rss]))
 check("felso mod: mit torolne (downloads)", names_of(cands, share),
       ["Regi.Film.2011", "arvalt.mkv"])
 check("felso mod: az rss alkonyvtar vedve van",
@@ -180,11 +341,11 @@ check("felso mod: @eaDir vedve van",
 check("felso mod: a Regi.Film.2011 merete",
       [c.size for c in cands if Path(c.path).name == "Regi.Film.2011"], [4096])
 
-cands_rss = q.plan_toplevel(rss, names, q.DEFAULT_EXCLUDES, protected=[share])
+cands_rss = q.plan_toplevel(rss, names, T(protected=[share]))
 check("felso mod: mit torolne (rss)", names_of(cands_rss, rss), ["tavalyi.mkv"])
 
 # --- vedelem az rss nelkul: latszik, hogy tenyleg kellett a masodik konyvtar
-cands_veszely = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES)
+cands_veszely = q.plan_toplevel(share, names, T())
 check("vedelem nelkul az rss is aldozat lenne",
       "rss" in names_of(cands_veszely, share), True)
 
@@ -196,15 +357,15 @@ check("kis-nagybetu: azonos nevet megtart",
 # --- 'fa' mod utvonal-megfeleltetessel, fajllista nelkul
 share_maps = [("/downloads", str(share)), ("/downloads/rss", str(rss))]
 roots, dirs = q.owned_paths(TORRENTS, {}, share_maps, share)
-cands = q.plan_tree(share, roots, dirs, q.DEFAULT_EXCLUDES, protected=[rss])
+cands = q.plan_tree(share, roots, dirs, T(protected=[rss]))
 check("fa mod: mit torolne", names_of(cands, share),
       ["Regi.Film.2011", "arvalt.mkv"])
 check("fa mod: a torrent sajat konyvtaraban nem turkal",
       any("Film.Egy.2024" in str(c.path) for c in cands), False)
 
 # --- 'fa' mod pontos (fajlonkenti) osszehasonlitassal
-roots, dirs = q.owned_paths(TORRENTS, FILES, share_maps, share)
-cands = q.plan_tree(share, roots, dirs, q.DEFAULT_EXCLUDES, protected=[rss])
+roots, dirs = q.owned_paths(TORRENTS, FAJLNEVEK, share_maps, share)
+cands = q.plan_tree(share, roots, dirs, T(protected=[rss]))
 check("pontos mod: az idegen fajl is felesleges", names_of(cands, share),
       ["Film.Egy.2024/mintakep.jpg", "Regi.Film.2011", "arvalt.mkv"])
 
@@ -222,24 +383,23 @@ felkesz_tor = [*TORRENTS, {"hash": "ddd", "name": "Uj.Film.2025",
                            "content_path": "/downloads/Uj.Film.2025"}]
 
 nevek_felkesz = q.owned_names(felkesz_tor)
-cands = q.plan_toplevel(share, nevek_felkesz, q.DEFAULT_EXCLUDES, protected=[rss])
+cands = q.plan_toplevel(share, nevek_felkesz, T(protected=[rss]))
 check("felso mod: a felkesz (.!qB) gyokeret megtartja",
       any(Path(c.path).name == felkesz_gyoker.name for c in cands), False)
 
 felkesz_maps = [("/downloads", str(share)), ("/downloads/rss", str(rss))]
-felkesz_fajlok = {**FILES, "bbb": [{"name": "Sorozat S01/e01.mkv"},
-                                   {"name": "Sorozat S01/e02.mkv"},
-                                   {"name": "Sorozat S01/e03.mkv"}]}
+felkesz_fajlok = {**FAJLNEVEK, "bbb": ["Sorozat S01/e01.mkv",
+                                       "Sorozat S01/e02.mkv",
+                                       "Sorozat S01/e03.mkv"]}
 r_f, d_f = q.owned_paths(felkesz_tor, felkesz_fajlok, felkesz_maps, share)
-cands = q.plan_tree(share, r_f, d_f, q.DEFAULT_EXCLUDES, protected=[rss])
+cands = q.plan_tree(share, r_f, d_f, T(protected=[rss]))
 check("fa+pontos mod: a felkesz fajlt is megtartja",
       any(q.INCOMPLETE_SUFFIX in str(c.path) for c in cands), False)
 felkesz.unlink()
 felkesz_gyoker.unlink()
 
 # --- min-kor: a frissen modositott elemet meghagyja
-cands = q.plan_toplevel(share, names, q.DEFAULT_EXCLUDES, min_age_days=1,
-                        protected=[rss])
+cands = q.plan_toplevel(share, names, T(protected=[rss], min_age_days=1))
 check("min-kor 1 nap: a friss elemeket meghagyja", names_of(cands, share), [])
 
 # --- melyen agazo fa: a bejaras nem lehet rekurziv (RecursionError)
@@ -267,7 +427,7 @@ melyfa_dirs = {q.path_key(p) for p in [kurzor, *kurzor.parents]}
 regi_korlat = sys.getrecursionlimit()
 sys.setrecursionlimit(verem_melyseg() + 120)  # keveseb, mint a fa melysege
 try:
-    melyfa_cands = q.plan_tree(melyfa, set(), melyfa_dirs)
+    melyfa_cands = q.plan_tree(melyfa, set(), melyfa_dirs, T())
     check("melyen agazo fat is bejar (nem rekurziv)",
           [Path(c.path).name for c in melyfa_cands], ["legalul.mkv"])
 except RecursionError:
@@ -293,12 +453,12 @@ def tiltakozo_scandir(ut):
 
 
 share_maps2 = [("/downloads", str(share)), ("/downloads/rss", str(rss))]
-roots2, dirs2 = q.owned_paths(TORRENTS, FILES, share_maps2, share)
+roots2, dirs2 = q.owned_paths(TORRENTS, FAJLNEVEK, share_maps2, share)
 os.scandir = tiltakozo_scandir
 try:
     gondok = []
-    cands = q.plan_tree(share, roots2, dirs2, q.DEFAULT_EXCLUDES,
-                        protected=[rss], on_warn=gondok.append)
+    cands = q.plan_tree(share, roots2, dirs2,
+                        T(protected=[rss], on_warn=gondok.append))
     check("olvashatatlan alkonyvtar: a tobbi resz elkeszul",
           names_of(cands, share), ["Regi.Film.2011", "arvalt.mkv"])
     check("es szol rola", len(gondok), 1)
@@ -313,7 +473,7 @@ finally:
 tiltott_kulcs = q.path_key(share)
 os.scandir = tiltakozo_scandir
 try:
-    q.plan_tree(share, roots2, dirs2, q.DEFAULT_EXCLUDES)
+    q.plan_tree(share, roots2, dirs2, T())
     check("a vizsgalt konyvtar olvasasi hibaja megallit", "nem dobott hibat",
           "QbtError")
 except q.QbtError:
@@ -338,6 +498,128 @@ check("owner_target: ures konyvtarlista sem szall el",
       q.owner_target(Path("/a/b/c.mkv"), []), Path("/a/b"))
 check("owner_target: a legkulso konyvtart valasztja",
       q.owner_target(Path("/a/b/c.mkv"), [Path("/a/b"), Path("/a")]), Path("/a"))
+
+# --- gyoker-konyvtar nelkuli torrent (a "ne hozzon letre almappat" elrendezes)
+#
+# A qBittorrent ilyenkor a content_path mezoben MAGAT a mentesi konyvtarat
+# kuldi (TorrentImpl::contentPath). Korabban ebbol a mentesi konyvtar neve
+# latszott "gyoker-nevnek", a torrent sajat fajljai pedig feleslegesnek - a
+# program letorolte volna a seedelt fajlokat.
+
+gyokertelen = {"hash": "ggg", "name": "Ket.Fajl.Csomag",
+               "save_path": "/downloads", "download_path": "",
+               "content_path": "/downloads"}
+check("gyokertelen torrent: nincs gyoker-neve", q.root_name(gyokertelen), "")
+check("es a program eszreveszi", q.gyokertelen_torrentek([gyokertelen, *TORRENTS]),
+      ["ggg"])
+check("a rendes torrenteknek van gyoker-neve",
+      q.gyokertelen_torrentek(TORRENTS), [])
+check("fajllista nelkul semmit nem tud rola",
+      q.owned_names([gyokertelen]), set())
+check("a fajllistabol viszont a legfelso szintu neveket veszi",
+      q.owned_names([gyokertelen], {"ggg": ["a.mkv", "Sub/b.srt"]}),
+      {"a.mkv", "sub"})
+check("a fajllista a 'felso' modban is kell hozza",
+      q.kell_fajllista([gyokertelen, *TORRENTS], [share], q.Beallitas(), False),
+      ["ggg"])
+
+# ha a fajllista hianyzik, a program nem talalgat, hanem leall
+try:
+    q.plan_all([gyokertelen], {}, [share], q.Beallitas())
+    check("fajllista nelkul biztonsagi fek", "nem allt le", "SafetyStop")
+except q.SafetyStop as exc:
+    check_true("fajllista nelkul biztonsagi fek",
+               "gyoker-konyvtara" in str(exc), exc)
+
+# fajllistaval viszont pontosan tudja, mit kell megtartania
+gyoker_konyvtar = Path(tmp) / "gyokertelen"
+gyoker_konyvtar.mkdir()
+(gyoker_konyvtar / "a.mkv").write_bytes(b"a" * 8)
+(gyoker_konyvtar / "b.mkv").write_bytes(b"b" * 8)
+(gyoker_konyvtar / "szemet.mkv").write_bytes(b"x" * 8)
+g_torrent = {"hash": "ggg", "name": "Ket.Fajl.Csomag",
+             "save_path": str(gyoker_konyvtar), "download_path": "",
+             "content_path": str(gyoker_konyvtar)}
+g_fajlok = {"ggg": ["a.mkv", "b.mkv"]}
+jeloltek = q.plan_all([g_torrent], g_fajlok, [gyoker_konyvtar], q.Beallitas())
+check("felso mod: csak a valoban felesleges elem marad",
+      [c.path.name for c in jeloltek], ["szemet.mkv"])
+jeloltek = q.plan_all([g_torrent], g_fajlok, [gyoker_konyvtar],
+                      q.Beallitas(mode=q.Mod.FA))
+check("fa mod: ugyanez",
+      [c.path.name for c in jeloltek], ["szemet.mkv"])
+shutil.rmtree(str(gyoker_konyvtar))
+
+# --- megszakitas: ket elem kozott all meg, nem a felenel
+megszakito = q.Figyelo(megszakitva=lambda: True)
+try:
+    q.plan_toplevel(share, names, q._Terv.keszit(q.Beallitas(), [], megszakito))
+    check("felso mod: megszakithato", "nem allt le", "Megszakitva")
+except q.Megszakitva:
+    check("felso mod: megszakithato", "Megszakitva", "Megszakitva")
+
+# a fa modban ritkabban (JELZES_ELEMENKENT) nezzuk: sok elem kell hozza
+sokfa = Path(tmp) / "sokfa"
+sokfa.mkdir()
+for i in range(q.JELZES_ELEMENKENT + 5):
+    (sokfa / f"f{i:05d}.mkv").write_bytes(b"s")
+try:
+    q.plan_tree(sokfa, set(), set(),
+                q._Terv.keszit(q.Beallitas(), [], megszakito))
+    check("fa mod: megszakithato", "nem allt le", "Megszakitva")
+except q.Megszakitva:
+    check("fa mod: megszakithato", "Megszakitva", "Megszakitva")
+
+haladas = []
+q.plan_tree(sokfa, set(), set(), q._Terv.keszit(
+    q.Beallitas(), [], q.Figyelo(on_progress=haladas.append)))
+check_true("fa mod: kozben jelez a haladasrol", haladas, haladas)
+shutil.rmtree(str(sokfa))
+
+# --- erintett_torrentek: csak azokhoz kell fajllista, amik ide esnek
+tavoli = [*TORRENTS, {"hash": "zzz", "name": "Mashol",
+                      "save_path": "/media/egyeb", "download_path": "",
+                      "content_path": "/media/egyeb/Mashol"}]
+b_fa = q.Beallitas(mode=q.Mod.FA, maps=(("/downloads", str(share)),
+                                        ("/downloads/rss", str(rss))))
+check("erintett_torrentek: a mas konyvtarban levot kihagyja",
+      q.erintett_torrentek(tavoli, [share, rss], b_fa), ["aaa", "bbb", "ccc"])
+check("erintett_torrentek: csak az rss-t vizsgalva is megvan a szuloje",
+      q.erintett_torrentek(TORRENTS, [rss], b_fa), ["aaa", "bbb", "ccc"])
+check("erintett_torrentek: megfeleltetes nelkul sincs talalat mashol",
+      q.erintett_torrentek(tavoli, [share], q.Beallitas(mode=q.Mod.FA)), [])
+
+# --- csere_ujraprobalva: a Windows pillanatnyi zarolasat kivarja
+forras = Path(tmp) / "uj.json"
+cel = Path(tmp) / "regi.json"
+forras.write_text("uj", encoding="utf-8")
+cel.write_text("regi", encoding="utf-8")
+eredeti_replace = os.replace
+zarolas = [2]  # az elso ket probalkozas elszall
+
+
+def akadozo_replace(a, b, **kw):
+    if zarolas[0] > 0:
+        zarolas[0] -= 1
+        raise PermissionError(32, "A fajlt mas hasznalja")
+    return eredeti_replace(a, b, **kw)
+
+
+os.replace = akadozo_replace
+try:
+    q.csere_ujraprobalva(forras, cel, probak=5)
+    check("csere: a zarolas utan sikerul", cel.read_text(encoding="utf-8"), "uj")
+    zarolas[0] = 99
+    forras.write_text("megujabb", encoding="utf-8")
+    try:
+        q.csere_ujraprobalva(forras, cel, probak=2)
+        check("csere: vegleges zarolasnal hibat dob", "nem dobott",
+              "PermissionError")
+    except PermissionError:
+        check("csere: vegleges zarolasnal hibat dob", "PermissionError",
+              "PermissionError")
+finally:
+    os.replace = eredeti_replace
 
 shutil.rmtree(str(tmp))
 
@@ -488,6 +770,17 @@ check("main: a torolt fajl bekerult a naploba",
       [(m[1], m[5]) for m in naplozott], [("torolve", "naplozando.mkv")])
 check("main: a konyvtar oszlop a fajl helye", naplozott[0][4], str(share))
 check("main: a meret is megvan", naplozott[0][3], "24")
+
+# az esemenynaplo a torlesi naplo melle kerul - de jelszo nelkul
+esemeny_ut = naplo_fajl.parent / "esemenyek.log"
+esemeny_szoveg = esemeny_ut.read_text(encoding="utf-8") if esemeny_ut.is_file() else ""
+check("main: keszult esemenynaplo is", esemeny_ut.is_file(), True)
+check_true("main: rogziti az indulast", "indul: qbt_cleanup" in esemeny_szoveg,
+           esemeny_szoveg)
+check_true("main: rogziti az eredmenyt is", "kesz:" in esemeny_szoveg,
+           esemeny_szoveg)
+check("main: a jelszo NEM kerul az esemenynaploba",
+      PASSWORD in esemeny_szoveg, False)
 
 # --nincs-naplo eseten ne keszuljon semmi
 (share / "naplo.nelkul.mkv").write_bytes(b"n" * 8)
