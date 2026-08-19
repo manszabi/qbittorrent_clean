@@ -1,1 +1,3 @@
 Egy ismert eltérés maradt szándékosan: a felületen nincs időkorlát/önaláírt-TLS beállítás, csak a parancssorban — szólj, ha ezt is kéred.
+mypy-t is tedd bele a CI-be
+a web_downloader létrehoz egy Virtualis kornyezet-et, .venv könyvtárba, tegye ez a kód is ezt-
