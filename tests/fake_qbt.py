@@ -28,11 +28,16 @@ TORRENTS = [
      "content_path": "/downloads/rss/hetivideo.mkv"},
 ]
 
+# A WebUI valaszanak alakja (a valodi API tobb mezot kuld, de a program csak a
+# nevet hasznalja - lasd QbtClient.fajlnevek).
 FILES = {
     "aaa": [{"name": "Film.Egy.2024/film.mkv"}, {"name": "Film.Egy.2024/film.srt"}],
     "bbb": [{"name": "Sorozat S01/e01.mkv"}, {"name": "Sorozat S01/e02.mkv"}],
     "ccc": [{"name": "hetivideo.mkv"}],
 }
+
+# Ugyanez abban az alakban, ahogy a motor varja (csak a nevek).
+FAJLNEVEK = {h: [f["name"] for f in lista] for h, lista in FILES.items()}
 
 
 class Viselkedes:

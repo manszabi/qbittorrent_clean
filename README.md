@@ -206,6 +206,13 @@ kapcsolja ki (a törlési naplóval együtt).
 
 ## Amire figyel
 
+- A **gyökérmappa nélküli** torrenteket is felismeri. Ha a torrentet a
+  qBittorrent „ne hozzon létre almappát" tartalom-elrendezésével adták hozzá,
+  a fájljai közvetlenül a letöltési könyvtárban vannak, és a WebUI a
+  `content_path` mezőben **magát a mentési könyvtárat** küldi. Ilyenkor a
+  program – mindkét üzemmódban – lekéri a torrent fájllistáját, hogy tudja,
+  mi tartozik hozzá; ha az nem érhető el, inkább leáll, semhogy a seedelt
+  fájlokat feleslegesnek lássa.
 - A **félkész** letöltéseket megtartja: a `.!qB` végződésű fájlokat és a
   torrent ideiglenes (`download_path`) könyvtárát is a torrenthez tartozónak
   veszi – mindkét üzemmódban.
@@ -291,5 +298,7 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
 | `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
-| `terheles_test.py` | Terhelés és mérés: 8000 bejegyzésű megosztás mindkét módban, memóriacsúcs, párhuzamos fájllista-lekérés, a lekérdezendő torrentek szűrése. A határok bőségesek, de a nagyságrendi elcsúszást elkapják. |
+| `windows_test.py` | Windows 11 specifikus szabályok Linuxon szimulálva: hosszú útvonalak (`\\?\`, UNC), meghajtó-gyökér, kis-nagybetű, kuka-nevek, `%APPDATA%`, DPI-tudatosság, cp852 konzolkódlap, a napló mappájának megnyitása. Ahol lehet, a CPython saját `ntpath` modulja a mérce. |
+| `terheles_test.py` | Terhelés és mérés: 8000 bejegyzésű megosztás mindkét módban, memóriacsúcs, párhuzamos fájllista-lekérés, a lekérdezendő torrentek szűrése,
+a fájllisták memóriaigénye, a törlési ciklus költsége. A határok bőségesek, de a nagyságrendi elcsúszást elkapják. |
 | `gui_test.py` | A valódi Tkinter ablak végigkattintgatása: kapcsolódás, vizsgálat, pipálgatás, törlés kukába és véglegesen, beállítások mentése és elrontott beállítás-fájl, háttérszálban keletkező hiba, megszakítás, a lista adagolt feltöltése. Fejnélküli gépen `xvfb-run` kell hozzá. |

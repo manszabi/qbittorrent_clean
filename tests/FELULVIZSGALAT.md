@@ -79,16 +79,104 @@ megosztáson ez könyvtáranként egy forduló, nem fájlonként egy.
 Az adagolás nem csak érzésre jobb: összességében is gyorsabb, mert a Tk nem
 egyetlen óriási újrarajzolással birkózik.
 
-## 3. Végleges tesztek
+## 3. Második kör: hibakeresés, Windows 11, memória és processzoridő
+
+Ez a kör nem az általános felépítést nézte, hanem azt, hogy **igaz-e, amit a
+program feltételez**. Ahol lehetett, a forrás a mérce lett: a qBittorrent
+WebUI-jának C++ forrása, a CPython `ntpath` modulja és a Windows-manifestje –
+nem az emlékezet.
+
+### 3.1 A legfontosabb: adatvesztés gyökérmappa nélküli torrenteknél
+
+A qBittorrent forrásában (`TorrentImpl::contentPath`) ez áll:
+
+```cpp
+if (filesCount() == 1)
+    return (actualStorageLocation() / filePath(0));
+const Path rootPath = this->rootPath();
+return (rootPath.isEmpty() ? actualStorageLocation() : rootPath);
+```
+
+Tehát egy **többfájlos, gyökérmappa nélküli** torrentnél – ilyet a „ne hozzon
+létre almappát" tartalom-elrendezés készít – a `content_path` **maga a mentési
+könyvtár**. A program eddig ebből a *letöltési könyvtár nevét* vette
+„gyökér-névnek", a torrent saját fájljait pedig nem ismerte fel.
+
+Próba a javítás előtt (3 fájl, kettő a torrenté):
 
 ```
-motor (qbt_test.py)                      139 / 139
-felület (gui_test.py, Xvfb)               81 / 81
+root_name() eredmenye: 'downloads'
+FELSO mod - amit torolne:  a.mkv, b.mkv, szemet.mkv
+FA mod   - amit torolne:  a.mkv, b.mkv, szemet.mkv
+```
+
+Vagyis **a seedelt fájlokat is törölte volna, mindkét üzemmódban**.
+
+Javítás: a `root_name()` ilyenkor üres nevet ad; a program a torrent
+fájllistájából veszi a legfelső szintű neveket, és ezt **az üzemmódtól
+függetlenül** lekéri (`kell_fajllista`). Ha a lista hiányzik, a `plan_all`
+biztonsági fékkel leáll, ahelyett hogy találgatna. Ugyanez a futás a javítás
+után:
+
+```
+Felesleges elemek (1 db, 32 B):  szemet.mkv
+megmaradt: ['elso.mkv', 'masodik.mkv']
+```
+
+### 3.2 További javítások
+
+| # | Hiba | Következmény | Bizonyíték / javítás |
+|---|------|--------------|----------------------|
+| 15 | Gyökérmappa nélküli torrent (lásd fent) | A seedelt fájlok törlése | reprodukált futás + 12 új teszt |
+| 16 | UNC-célra mutató megfeleltetés záró perjellel (`\\gep\share\`) hibás kulcsot adott | A `//gep/share//film` alak **egyetlen** valódi elemmel sem egyezett – a torrent mappáját feleslegesnek látta volna | különbség-teszt a régi és az új megvalósítás között (13 eset) |
+| 17 | Lejárt munkamenetnél minden szál külön bejelentkezett | 16 párhuzamos lekérdezésnél 16 egyidejű bejelentkezés ugyanarra a munkamenetre | számlálós dedup; teszt: négy egyszerre érkező szálból egy lép be |
+| 18 | Az újrapróbálkozás várakozása nem volt megszakítható | A *Megszakítás* után is végig kellett várni a hátralévő másodperceket | a várakozás 0,2 mp-es szeletekben figyeli a megszakítást; teszt: 0,5 mp alatt leáll |
+| 19 | A fájllisták teljes WebUI-válasza a memóriában maradt | 500 torrent × 200 fájl esetén 48 MB, pedig csak a névre van szükség | `QbtClient.fajlnevek`; mérve 8,9 MB → 1,3 MB (100×200-on) |
+| 20 | `owned_paths` fájlonként `Path` objektumokat épített | A profilozás szerint a pathlib vitte az idő felét | szöveg-kulcsok; 100 000 fájlra **1,54 mp → 0,26 mp** |
+| 21 | `owner_target` elemenként újrarendezte a könyvtárlistát | A törlési ciklus legdrágább része volt | előkészített, gyorsítótárazott lista; 20 000 elemre **0,43 mp → 0,13 mp** |
+| 22 | A `plan_tree` a rendezéshez újra előállította az összehasonlítási kulcsokat | Fölösleges NFC + casefold minden találatra | a kulcs a találat mellett utazik; 100 000 elemre **0,65 mp → 0,02 mp** |
+| 23 | A `Candidate` akkor is újraépítette a `Path`-ot, ha már az volt | 100 000 elemnél 0,07 mp és fölösleges szemét | típusellenőrzés |
+
+### 3.3 Amit megnéztünk, és **nem** kellett javítani
+
+- **`json.load(stream)` a `read()+decode()+loads()` helyett**: 5000 torrentnél
+  mérve **ugyanaz** a 6,8 MB csúcs – a `json` úgyis egyben olvassa be. Az
+  „optimalizálás" itt nem hozott volna semmit, ezért elmaradt.
+- **A `root_path` mező** (a WebUI küldi): a qBittorrent forrása szerint pontosan
+  akkor üres, amikor nincs gyökérmappa – tehát nem ad többletinformációt a
+  `content_path`-hoz képest.
+- **DPI**: a CPython Windows-manifestje (`PC/python.manifest`) **nem** állít
+  `dpiAware`-t (csak `longPathAware`-t), tehát a `SetProcessDpiAwareness(1)`
+  hívásra tényleg szükség van. Per-monitoros DPI-t szándékosan nem kérünk: a
+  Tk 8.6 nem kezeli a `WM_DPICHANGED` üzenetet, így a másik monitorra húzott
+  ablak rossz méretű lenne – a rendszerszintű tudatosságnál viszont csak
+  átméretezett (életlen) marad.
+- **Hosszú útvonalak**: a manifest `longPathAware=true` beállítása önmagában
+  csak akkor elég, ha a `LongPathsEnabled` beállítás is be van kapcsolva a
+  rendszerleíró adatbázisban. A `\?\` előtag ettől függetlenül működik, ezért
+  maradt.
+
+### 3.4 Mérések (második kör)
+
+| Mérés | Előtte | Utána |
+|---|---|---|
+| `owned_paths`, 100 000 fájl | 1,54 mp | **0,26 mp** |
+| `owner_target`, 20 000 törölt elem | 0,43 mp | **0,13 mp** |
+| találatok rendezése, 100 000 elem | 0,65 mp | **0,02 mp** |
+| fájllisták a memóriában (100 × 200) | 8,9 MB | **1,3 MB** |
+| fájllisták a memóriában (500 × 200) | 48,3 MB | **10,2 MB** |
+
+## 4. Végleges tesztek
+
+```
+motor (qbt_test.py)                      155 / 155
+felület (gui_test.py, Xvfb)               84 / 84
 törlési és eseménynapló (naplo_test.py)   49 / 49
+Windows 11 (windows_test.py)              33 / 33
 indító (indit_test.py)                    27 / 27
 parancsfájlok (bat_test.py)               21 / 21
-terhelés és mérések (terheles_test.py)    10 / 10
-összesen                                 327 / 327
+terhelés és mérések (terheles_test.py)    14 / 14
+összesen                                 383 / 383
 ```
 
 `ruff check .` – tiszta, a pylint-szabályokkal (`PL`) együtt.

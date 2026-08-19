@@ -3,7 +3,7 @@
 
 [project]
 name = "qbittorrent-clean"
-version = "2.1.0"
+version = "2.2.0"
 description = "A qBittorrentben mar nem szereplo fajlok kilistazasa es torlese"
 readme = "README.md"
 license = "MIT"

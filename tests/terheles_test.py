@@ -105,6 +105,70 @@ check("fa mod: a torrentes fajlok maradnak", len(jeloltek),
 
 shutil.rmtree(str(tmp), ignore_errors=True)
 
+# ------------------------------------------- sok torrent fajllistaja (CPU)
+
+# Ez a legdragabb szamitas: fajlonkent kell eldonteni, hova esik a torrent
+# tartalma. A meresek szerint korabban a pathlib vitte az ido felet, ezert a
+# fuggveny most szoveg-kulcsokkal dolgozik.
+NAGY_TORRENT, NAGY_FAJL = 500, 200
+nagy_torrentek = [{"hash": f"n{t:04d}", "name": f"Kiadas{t}",
+                   "save_path": "/downloads", "download_path": "",
+                   "content_path": f"/downloads/Kiadas{t}"}
+                  for t in range(NAGY_TORRENT)]
+nagy_fajlok = {f"n{t:04d}": [f"Kiadas{t}/resz{i:03d}.mkv" for i in range(NAGY_FAJL)]
+               for t in range(NAGY_TORRENT)}
+
+roots, _ = meres(f"owned_paths {NAGY_TORRENT * NAGY_FAJL} fajlra",
+                 lambda: q.owned_paths(nagy_torrentek, nagy_fajlok,
+                                       [("/downloads", "/mnt/share")],
+                                       "/mnt/share"), 3)
+check("minden fajl megtartando elemkent szerepel", len(roots),
+      NAGY_TORRENT * NAGY_FAJL)
+
+# a torlesi ciklus: elemenkent kell eldonteni, melyik vizsgalt konyvtarba esik
+celok = [Path("/mnt/share"), Path("/mnt/share/rss"), Path("/mnt/masik")]
+utak = [Path(f"/mnt/share/Kiadas{i}/resz.mkv") for i in range(20000)]
+meres("owner_target 20 000 torolt elemre",
+      lambda: [q.owner_target(u, celok) for u in utak], 1)
+
+# memoria: a WebUI teljes valasza vs. csak a fajlnevek
+def valasz(t, i):
+    """A qBittorrent /torrents/files valaszanak egy eleme (a valodi mezokkel)."""
+    return {"index": i, "name": f"Kiadas{t}/resz{i:03d}.mkv", "size": 1234567890,
+            "progress": 1.0, "priority": 1, "is_seed": True,
+            "piece_range": [i * 100, i * 100 + 99], "availability": 1.0}
+
+
+def melyseg(obj, latott=None):
+    """Rekurziv memoriameret."""
+    latott = set() if latott is None else latott
+    if id(obj) in latott:
+        return 0
+    latott.add(id(obj))
+    n = sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            n += melyseg(k, latott) + melyseg(v, latott)
+    elif isinstance(obj, (list, tuple, set)):
+        for x in obj:
+            n += melyseg(x, latott)
+    return n
+
+
+MINTA_TORRENT, MINTA_FAJL = 100, 200
+teljes = {f"m{t}": [valasz(t, i) for i in range(MINTA_FAJL)]
+          for t in range(MINTA_TORRENT)}
+csak_nev = {h: [f["name"] for f in lista] for h, lista in teljes.items()}
+m_teljes, m_nev = melyseg(teljes), melyseg(csak_nev)
+meresek.append((f"fajllista memoriaban ({MINTA_TORRENT}x{MINTA_FAJL}), teljes valasz",
+                f"{m_teljes / 1024 / 1024:.1f} MB", "-"))
+MB = 1024 * 1024
+meresek.append(("ugyanez csak a nevekkel (a valasztott)",
+                f"{m_nev / MB:.1f} MB", f"< {m_teljes / MB / 2:.1f} MB"))
+check_true("a nevek onmagukban feleannyit sem foglalnak",
+           m_nev < m_teljes / 2, f"{m_nev} vs {m_teljes}")
+del teljes, csak_nev
+
 # ------------------------------------------------- sok torrent, lassu WebUI
 
 TORRENT_DB = 24

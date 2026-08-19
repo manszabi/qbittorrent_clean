@@ -716,6 +716,7 @@ class TakaritoApp:
 
     def _kapcsolat_szal(self, url: str, user: str, jelszo: str) -> tuple[Any, ...]:
         kliens = engine.QbtClient(url, user, jelszo)
+        kliens.megszakitva = self.megallj.is_set
         kliens.login()
         return ("kapcsolat", kliens.version(), len(kliens.torrents()))
 
@@ -737,12 +738,15 @@ class TakaritoApp:
         """Külön szálon: WebUI lekérdezés + a könyvtárak átnézése. Tkinterhez
         nem nyúlhat, csak üzen a sorba, illetve az eredményt adja vissza."""
         kliens = engine.QbtClient(feladat.url, feladat.user, feladat.jelszo)
+        # A megszakítás a hálózati várakozás közben is hasson.
+        kliens.megszakitva = self.megallj.is_set
         kliens.login()
         torrentek = kliens.torrents()
-        fajlok: dict[str, list[dict[str, Any]]] = {}
-        if feladat.pontos and feladat.beallitas.mode == engine.Mod.FA:
-            kellenek = engine.erintett_torrentek(
-                torrentek, feladat.konyvtarak, feladat.beallitas)
+        fajlok: dict[str, list[str]] = {}
+        pontos = feladat.pontos and feladat.beallitas.mode == engine.Mod.FA
+        kellenek = engine.kell_fajllista(
+            torrentek, feladat.konyvtarak, feladat.beallitas, pontos)
+        if kellenek:
             fajlok = kliens.files_many(
                 kellenek,
                 on_progress=lambda kesz, osszes: self._jelez(
@@ -878,6 +882,8 @@ class TakaritoApp:
         megszakadt = False
         osszes = len(elemek)
         naplo = qbt_naplo.nyitas(naplo_ut) if naplo_ut else None
+        # A könyvtárlistát egyszer alakítjuk át, nem elemenként.
+        gazdak = tuple(str(k) for k in konyvtarak)
         try:
             for sorszam, (index, elem) in enumerate(
                     zip(indexek, elemek, strict=True), 1):
@@ -886,7 +892,7 @@ class TakaritoApp:
                     # a következőhöz nem nyúlunk. Ami elkészült, az érvényes.
                     megszakadt = True
                     break
-                gazda = engine.owner_target(elem.path, konyvtarak)
+                gazda = engine.owner_target(elem.path, gazdak)
                 siker, uzenet = engine.remove_entry(elem, gazda, kuka)
                 if siker:
                     kesz.add(index)

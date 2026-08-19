@@ -351,6 +351,42 @@ check("olvashatatlan beallitas-fajlt is elvisel", app.v_mod.get(), "felso")
 beallitas.write_text(elmentett, encoding="utf-8")
 app.beallitasok_betoltese()
 
+# --- gyoker-konyvtar nelkuli torrent ----------------------------------------
+#
+# A qBittorrent "ne hozzon letre almappat" elrendezesenel a torrent fajljai
+# kozvetlenul a mentesi konyvtarban vannak. A felulet ilyenkor is le kell
+# kerje a fajllistat, kulonben a seedelt fajlokat feleslegesnek latna.
+
+g_mappa = tmp / "gyokertelen"
+g_mappa.mkdir()
+(g_mappa / "elso.mkv").write_bytes(b"1" * 16)
+(g_mappa / "masodik.mkv").write_bytes(b"2" * 16)
+(g_mappa / "szemet.mkv").write_bytes(b"3" * 16)
+g_torrentek = [{"hash": "ggg", "name": "Ket.Fajl.Csomag",
+                "save_path": str(g_mappa), "download_path": "",
+                "content_path": str(g_mappa)}]
+g_url, g_server = start_server(torrents=g_torrentek,
+                               files={"ggg": [{"name": "elso.mkv"},
+                                              {"name": "masodik.mkv"}]})
+regi_url = app.v_url.get()
+app.v_url.set(g_url)
+app.lista_kony.delete(0, "end")
+app._konyvtar_felvesz(str(g_mappa))
+parbeszed.hibak = []
+app.vizsgalat()
+check_true("gyokertelen torrent: a vizsgalat lefutott",
+           varakozas(lambda: not app.dolgozik), app.v_allapot.get())
+check("es csak a valoban felesleges elemet ajanlja torlesre", nevek(),
+      ["szemet.mkv"])
+check("a torrent fajljai nem kerultek a listara", parbeszed.hibak, [])
+g_server.shutdown()
+app.v_url.set(regi_url)
+app.lista_kony.delete(0, "end")
+app._konyvtar_felvesz(str(share))
+app._konyvtar_felvesz(str(rss))
+app._elemek_kiirasa([])
+shutil.rmtree(str(g_mappa))
+
 # --- a talalati lista adagolt feltoltese ------------------------------------
 #
 # Egy nagy megosztason tizezer sor is johet. Egyszerre kiteve az ablak

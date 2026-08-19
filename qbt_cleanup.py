@@ -80,7 +80,7 @@ from typing import Any, Final
 
 import qbt_naplo
 
-__version__ = "2.1"
+__version__ = "2.2"
 
 API: Final = "/api/v2"
 
@@ -221,8 +221,14 @@ class QbtClient:
         # A tobb szalbol valo hasznalat rendben van: minden hivas sajat
         # kapcsolatot nyit, a sutis tarolot pedig a http.cookiejar maga zarja.
         # Az ujrabelepest viszont csak egy szal vegezze el (kulonben tizen
-        # kuldenenek egyszerre bejelentkezest ugyanarra a lejart munkamenetre).
+        # kuldenenek egyszerre bejelentkezest ugyanarra a lejart munkamenetre):
+        # a szamlalobol latszik, hogy kozben mar belepett-e valaki.
         self._belepes_zar = threading.Lock()
+        self._belepesek = 0
+        # A hivo ideallithat egy "megszakitottak?" kerdest: az ujraprobalkozas
+        # elotti varakozas ezt figyeli, kulonben a felulet Megszakitas gombja
+        # utan is masodpercekig varna a valaszra.
+        self.megszakitva: Callable[[], bool] | None = None
 
     # -- egyetlen hivas ----------------------------------------------------
 
@@ -260,6 +266,33 @@ class QbtClient:
                 pass  # a datum alaku Retry-After-t nem ertelmezzuk
         return PROBA_SZUNET * (2 ** proba)
 
+    def _var(self, mennyit: float) -> None:
+        """Varakozas ket probalkozas kozott, a megszakitasra figyelve.
+
+        Nem egyetlen hosszu alvas: kulonben a felulet Megszakitas gombja utan
+        is vegig kellene varni a hatralevo masodperceket."""
+        vege = time.monotonic() + mennyit
+        while True:
+            if self.megszakitva and self.megszakitva():
+                raise Megszakitva
+            maradt = vege - time.monotonic()
+            if maradt <= 0:
+                return
+            time.sleep(min(0.2, maradt))
+
+    def _ujra_belep(self) -> None:
+        """Ujra bejelentkezes lejart munkamenet utan.
+
+        Ha kozben egy masik szal mar belepett, nem lepunk be megegyszer: 16
+        parhuzamos lekerdezesnel kulonben 16 bejelentkezes indulna egyszerre
+        ugyanarra a lejart munkamenetre."""
+        latott = self._belepesek
+        with self._belepes_zar:
+            if self._belepesek != latott:
+                return  # mas szal kozben mar elintezte
+            self.login()
+            self._belepesek += 1
+
     def _call(
         self,
         path: str,
@@ -280,9 +313,9 @@ class QbtClient:
         utolso: Exception | None = None
         for proba in range(max(1, self.halozat.probak)):
             if proba:
-                time.sleep(self._varakozas(utolso, proba - 1)
-                           if isinstance(utolso, urllib.error.HTTPError)
-                           else PROBA_SZUNET * (2 ** (proba - 1)))
+                self._var(self._varakozas(utolso, proba - 1)
+                          if isinstance(utolso, urllib.error.HTTPError)
+                          else PROBA_SZUNET * (2 ** (proba - 1)))
             try:
                 return self._keres(path, params, post)
             except urllib.error.HTTPError as exc:
@@ -296,8 +329,7 @@ class QbtClient:
                     # kezdeni az egeszet. Ha a jelszo rossz, a belepes maga
                     # szall el, ertheto uzenettel.
                     if ujrabelepes and self.username and not post:
-                        with self._belepes_zar:
-                            self.login()
+                        self._ujra_belep()
                         return self._call(path, params, post,
                                           ujrabelepes=False)
                     raise QbtError(
@@ -361,20 +393,28 @@ class QbtClient:
             raise QbtError(f"Varatlan fajllista a(z) {torrent_hash} torrenthez")
         return data
 
+    def fajlnevek(self, torrent_hash: str) -> list[str]:
+        """Egy torrent fajljainak neve (a torrent gyokerehez kepest).
+
+        A WebUI valaszabol csak a nev kell; a meret, az allapot es a
+        darab-tartomanyok megtartasa merve 500 torrent x 200 fajl eseten 48 MB
+        lenne a memoriaban, csak a nevekkel 10 MB."""
+        return [str(item.get("name") or "") for item in self.files(torrent_hash)]
+
     def files_many(
         self,
         hashes: Sequence[str],
         on_progress: Callable[[int, int], None] | None = None,
         megszakitva: Callable[[], bool] | None = None,
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Tobb torrent fajllistaja egyszerre.
+    ) -> dict[str, list[str]]:
+        """Tobb torrent fajlneveinek lekerese egyszerre.
 
         A qBittorrent API-ban nincs kotegelt lekeres: torrentenkent egy hivas
         kell. Egyenkent, egymas utan ez ezer torrentnel percekben merheto -
         pedig a legtobb ido varakozas. Ezert parhuzamosan kerdezzuk le; a
         parhuzamossag felso hatara MAX_SZALAK, hogy egy gyenge NAS-t se
         terheljunk tul."""
-        eredmeny: dict[str, list[dict[str, Any]]] = {}
+        eredmeny: dict[str, list[str]] = {}
         egyediek = list(dict.fromkeys(h for h in hashes if h))
         if not egyediek:
             return eredmeny
@@ -383,7 +423,7 @@ class QbtClient:
         pool = ThreadPoolExecutor(max_workers=szalak,
                                   thread_name_prefix="qbt-fajlok")
         try:
-            munkak = {pool.submit(self.files, h): h for h in egyediek}
+            munkak = {pool.submit(self.fajlnevek, h): h for h in egyediek}
             for munka in as_completed(munkak):
                 eredmeny[munkak[munka]] = munka.result()
                 kesz += 1
@@ -584,24 +624,52 @@ def apply_maps(
             return dst
         rest = strip_prefix(remote, prefix, ignore_case)
         if rest:
-            return str(Path(dst) / rest)
+            # Szandekosan nem Path-tal fuzunk: fajlonkent hivjuk, es a merés
+            # szerint a pathlib vitte az ido felet. Az eredmeny osszehasonlitasra
+            # valo (a perjelek Windowson vegyesek lehetnek benne) - a path_key()
+            # ugyis egysegesiti oket.
+            return dst.rstrip("/\\") + "/" + rest
     return None
 
 
 def root_name(torrent: Torrent, ignore_case: bool = True) -> str:
     """A torrent gyoker-eleme: az a fajl vagy konyvtar, ami a mentesi
-    konyvtarban letrejon."""
+    konyvtarban letrejon. Ha nincs ilyen, ures szoveg.
+
+    Nincs gyoker-eleme annak a tobbfajlos torrentnek, amit a qBittorrent "ne
+    hozzon letre almappat" tartalom-elrendezesevel adtak hozza: a fajljai
+    kozvetlenul a mentesi konyvtarban vannak. A WebUI ilyenkor a content_path
+    mezoben MAGAT A MENTESI KONYVTARAT kuldi (lasd a qBittorrent forrasaban a
+    TorrentImpl::contentPath fuggvenyt), tehat a mentesi konyvtar neve latszana
+    "gyoker-nevnek". Ez korabban azt jelentette, hogy a torrent sajat fajljait
+    a program feleslegesnek latta - es letorolte volna oket. Most inkabb
+    semmit nem allitunk: a hivo a fajllistabol tudja meg a neveket
+    (gyokertelen_torrentek + owned_names)."""
     content = normalize_remote(torrent.get("content_path") or "")
-    save = normalize_remote(torrent.get("save_path") or "")
+    save = normalize_remote(torrent.get("save_path") or "").rstrip("/")
     if content and save:
-        rest = strip_prefix(content, save.rstrip("/") + "/", ignore_case)
+        rest = strip_prefix(content, save + "/", ignore_case)
         if rest:
             first = rest.split("/", 1)[0]
             if first:
                 return first
+        if norm_key(content, ignore_case) == norm_key(save, ignore_case):
+            return ""  # a fajlok kozvetlenul a mentesi konyvtarban vannak
     if content:
         return content.rsplit("/", 1)[-1]
     return (torrent.get("name") or "").strip()
+
+
+def gyokertelen_torrentek(torrents: Iterable[Torrent],
+                          ignore_case: bool = True) -> list[str]:
+    """Azoknak a torrenteknek az azonositoja, amiknek nincs gyoker-elemuk.
+
+    Ezekhez a fajllistat is le kell kerni - kulonben nem tudjuk, mi tartozik
+    hozzajuk a mentesi konyvtarban. Ritka eset, ezert nem drag: a torrentek
+    tobbsegenek van gyoker-konyvtara vagy egyetlen fajlja."""
+    return [thash for torrent in torrents
+            if (thash := (torrent.get("hash") or ""))
+            and not root_name(torrent, ignore_case)]
 
 
 def kesz_kulcs(kulcs: str, ignore_case: bool = True) -> str:
@@ -619,19 +687,33 @@ def kesz_kulcs(kulcs: str, ignore_case: bool = True) -> str:
     return kulcs[:-len(veg)] if kulcs.endswith(veg) else kulcs
 
 
-def owned_names(torrents: Iterable[Torrent], ignore_case: bool = True) -> set[str]:
-    """A torrentek gyoker-neveinek halmaza (a 'felso' modhoz)."""
+def owned_names(
+    torrents: Iterable[Torrent],
+    files_by_hash: Mapping[str, Sequence[str]] | None = None,
+    ignore_case: bool = True,
+) -> set[str]:
+    """A torrentek gyoker-neveinek halmaza (a 'felso' modhoz).
+
+    Amelyik torrentnek nincs gyoker-eleme (lasd root_name), annak a
+    fajllistajabol vesszuk a legfelso szintu neveket - kulonben a sajat
+    fajljait feleslegesnek latnank."""
     names: set[str] = set()
+    fajlok = files_by_hash or {}
     for torrent in torrents:
         name = root_name(torrent, ignore_case)
         if name:
             names.add(norm_key(name, ignore_case))
+            continue
+        for rel in fajlok.get(torrent.get("hash") or "", ()):
+            elso = normalize_remote(rel).split("/", 1)[0]
+            if elso:
+                names.add(norm_key(elso, ignore_case))
     return names
 
 
 def owned_paths(
     torrents: Iterable[Torrent],
-    files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+    files_by_hash: Mapping[str, Sequence[str]],
     maps: Sequence[PathMap],
     target: str | os.PathLike[str],
     ignore_case: bool = True,
@@ -641,34 +723,40 @@ def owned_paths(
     Ket halmazt ad vissza:
       roots - ezek (es ami alattuk van) erintetlenek maradnak,
       dirs  - ezekbe bele kell nezni, mert alattuk van megtartando elem.
-    """
+
+    A `files_by_hash` ertekei fajlnevek (a torrent gyokerehez kepest), nem a
+    WebUI teljes valaszai: 500 torrent x 200 fajl eseten a teljes valasz 48 MB
+    lenne a memoriaban, csak a nevekkel 10 MB.
+
+    Szandekosan nem hasznal Path objektumot: fajlonkent hivjuk, es a merés
+    szerint a pathlib vitte az ido felet. A kulcsokat ugyanaz a path_key()
+    keszíti, tehat az eredmeny valtozatlan."""
     roots: set[str] = set()
     dirs: set[str] = set()
     target_key = path_key(target, ignore_case)
 
+    def add_kulcs(kulcs: str) -> None:
+        """Egy megtartando elem - es a folotte levo konyvtarak - felvetele."""
+        if not under(kulcs, target_key):
+            return  # nem a vizsgalt konyvtarban van
+        roots.add(kulcs)
+        while True:
+            vago = kulcs.rfind("/")
+            if vago <= 0:
+                return
+            kulcs = kulcs[:vago]
+            if kulcs in dirs:
+                return  # ezt (es a folotte levoket) mar felvettuk
+            if not under(kulcs, target_key):
+                return  # a vizsgalt konyvtar folott mar nincs mit vedeni
+            dirs.add(kulcs)
+            if kulcs == target_key:
+                return
+
     def add(remote: str) -> None:
         local = apply_maps(remote, maps, ignore_case)
-        if not local:
-            return
-        try:
-            local_path = Path(local)
-        except (OSError, ValueError):
-            return
-        key = path_key(local_path, ignore_case)
-        if not under(key, target_key):
-            return  # nem a vizsgalt konyvtarban van
-        roots.add(key)
-        parent = local_path.parent
-        while True:
-            pkey = path_key(parent, ignore_case)
-            if not under(pkey, target_key):
-                break  # a vizsgalt konyvtar folott mar nincs mit vedeni
-            if pkey in dirs:
-                break  # ezt (es a folotte levoket) mar felvettuk
-            dirs.add(pkey)
-            if pkey == target_key or parent == parent.parent:
-                break
-            parent = parent.parent
+        if local:
+            add_kulcs(path_key(local, ignore_case))
 
     for torrent in torrents:
         save = normalize_remote(torrent.get("save_path") or "")
@@ -680,13 +768,13 @@ def owned_paths(
         if files:
             # Pontos mod: fajlonkent. Igy a torrent sajat konyvtaraban levo
             # idegen fajl is felesleges elemnek szamit.
-            for item in files:
-                rel = normalize_remote(item.get("name") or "")
-                if not rel:
+            for rel in files:
+                tiszta = normalize_remote(rel)
+                if not tiszta:
                     continue
                 for base in (save, download):
                     if base:
-                        add(base + "/" + rel)
+                        add(base + "/" + tiszta)
         else:
             # A tenyleges hely a legpontosabb, de a befejezetlen torrent mas
             # konyvtarban is lehet, ezert minden szoba johetot felveszunk.
@@ -711,7 +799,10 @@ class Candidate:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        self.path = Path(self.path)
+        # Csak akkor alakitunk, ha kell: a tervezes mar Path-tal dolgozik, es
+        # a folosleges ujraepites tizezres nagysagrendben merheto.
+        if not isinstance(self.path, Path):
+            self.path = Path(self.path)
 
 
 def entry_size(path: str | os.PathLike[str], is_dir: bool) -> int:
@@ -917,7 +1008,10 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
     le az egeszet: azt az agat kihagyjuk - ami ott van, azt nem toroljuk -, es
     szolunk rola a figyelon keresztul. Magat a vizsgalt konyvtarat viszont
     tudnunk kell olvasni, kulonben nem tudjuk, mi van benne."""
-    out: list[Candidate] = []
+    # A talalatokat a mar kiszamolt osszehasonlitasi kulcsukkal egyutt gyujtjuk:
+    # a vegen igy nem kell ujra eloallitani a rendezeshez (merve 100 000 elemnel
+    # 0,65 mp helyett 0,02 mp).
+    out: list[tuple[str, Candidate]] = []
     kis_nagy = terv.beallitas.ignore_case
     gyoker = Path(target)
     varolista = [gyoker]
@@ -946,8 +1040,8 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
                 continue  # a torrente: se o, se ami alatta van
             if entry.is_symlink():
                 if key not in dirs:
-                    out.append(Candidate(full, False, 0,
-                                         "nem tartozik torrenthez (link)"))
+                    out.append((key, Candidate(
+                        full, False, 0, "nem tartozik torrenthez (link)")))
                 continue
             is_dir = entry.is_dir(follow_symlinks=False)
             if is_dir and key in dirs:
@@ -955,10 +1049,10 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
                 continue
             if too_young(full, terv.beallitas.min_age_days):
                 continue
-            out.append(Candidate(full, is_dir, entry_size(full, is_dir),
-                                 "nem tartozik torrenthez"))
-    out.sort(key=lambda c: path_key(c.path, kis_nagy))
-    return out
+            out.append((key, Candidate(full, is_dir, entry_size(full, is_dir),
+                                       "nem tartozik torrenthez")))
+    out.sort(key=lambda parost: parost[0])
+    return [jelolt for _, jelolt in out]
 
 
 def erintett_torrentek(
@@ -997,9 +1091,31 @@ def erintett_torrentek(
     return kellenek
 
 
+def _gyokertelen_ellenorzes(
+    torrents: Sequence[Torrent],
+    files_by_hash: Mapping[str, Sequence[str]],
+    ignore_case: bool,
+) -> None:
+    """Biztonsagi fek a gyoker-konyvtar nelkuli torrentekre.
+
+    Az ilyen torrent fajljai kozvetlenul a mentesi konyvtarban vannak, es a
+    nevuket CSAK a fajllistabol lehet megtudni. Ha az hianyzik, a program nem
+    latna, hogy azok a fajlok egy torrenthez tartoznak - es letorolne oket.
+    Inkabb leallunk: a hivo dolga lekerni a fajllistat (lasd
+    gyokertelen_torrentek)."""
+    hianyzik = [thash for thash in gyokertelen_torrentek(torrents, ignore_case)
+                if not files_by_hash.get(thash)]
+    if hianyzik:
+        raise SafetyStop(
+            f"{len(hianyzik)} torrentnek nincs gyoker-konyvtara (a fajljai "
+            "kozvetlenul a mentesi konyvtarban vannak), es a fajllistajuk "
+            "hianyzik. Enelkul a sajat fajljaikat is feleslegesnek latnam, "
+            "ezert leallok.")
+
+
 def plan_all(
     torrents: Sequence[Torrent],
-    files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+    files_by_hash: Mapping[str, Sequence[str]],
     targets: Sequence[Path],
     beallitas: Beallitas | None = None,
     figyelo: Figyelo | None = None,
@@ -1019,7 +1135,8 @@ def plan_all(
         raise SafetyStop("A qBittorrentben egyetlen torrent sincs, igy MINDENT "
                          "torolne.")
     kis_nagy = beallitas.ignore_case
-    names = (owned_names(torrents, kis_nagy)
+    _gyokertelen_ellenorzes(torrents, files_by_hash, kis_nagy)
+    names = (owned_names(torrents, files_by_hash, kis_nagy)
              if beallitas.mode == Mod.FELSO else set())
     candidates: list[Candidate] = []
     for target in targets:
@@ -1111,6 +1228,16 @@ def csere_ujraprobalva(forras: Path, cel: Path, probak: int = 5) -> None:
             time.sleep(0.15 * 2 ** proba)
 
 
+@functools.lru_cache(maxsize=8)
+def _gazdak(celok: tuple[str, ...]) -> tuple[tuple[str, Path], ...]:
+    """A vizsgalt konyvtarak osszehasonlitasra elokeszitve, a legkulsotol.
+
+    Elemenkent ujra rendezni es Path-ot epiteni feleslegesen draga: tizezer
+    torolt elemnel merve ez volt a torlesi ciklus legdragabb resze."""
+    return tuple((path_key(cel), Path(cel))
+                 for cel in sorted(celok, key=len))
+
+
 def owner_target(
     path: str | os.PathLike[str],
     targets: Sequence[str | os.PathLike[str]],
@@ -1119,11 +1246,13 @@ def owner_target(
     kukaban ez alapjan jon letre a konyvtar-szerkezet). Egymasba agyazott
     konyvtaraknal a legkulsot valasztjuk, igy nem utik egymast az azonos nevu
     fajlok (pl. rss\\film.mkv es film.mkv)."""
-    owners = sorted((Path(t) for t in targets), key=lambda t: len(str(t)))
-    if not owners:
+    gazdak = _gazdak(tuple(str(t) for t in targets))
+    if not gazdak:
         return Path(path).parent
-    parents = Path(path).parents
-    return next((t for t in owners if t in parents), owners[0])
+    kulcs = path_key(path)
+    return next((cel for gazda_kulcs, cel in gazdak
+                 if kulcs != gazda_kulcs and under(kulcs, gazda_kulcs)),
+                gazdak[0][1])
 
 
 def _letezik(path: str | os.PathLike[str]) -> bool:
@@ -1407,20 +1536,33 @@ def _jelszo(args: argparse.Namespace) -> str | None:
     return password
 
 
+def kell_fajllista(torrents: Sequence[Torrent], targets: Sequence[Path],
+                   beallitas: Beallitas, pontos: bool) -> list[str]:
+    """Mely torrentekhez kell a fajllista.
+
+    Ket okbol kell: a --pontos modhoz (ott fajlonkent hasonlitunk), illetve a
+    gyoker-konyvtar nelkuli torrentekhez - azoknal CSAK igy tudjuk meg, mi
+    tartozik hozzajuk a mentesi konyvtarban. Ez utobbi az uzemmodtol fuggetlen,
+    kulonben a sajat fajljaikat torolnenk."""
+    kellenek = gyokertelen_torrentek(torrents, beallitas.ignore_case)
+    if pontos:
+        kellenek += erintett_torrentek(torrents, targets, beallitas)
+    return list(dict.fromkeys(kellenek))
+
+
 def _lekerdezes(
     client: QbtClient, futas: _Futas, pontos: bool,
-) -> tuple[str, list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+) -> tuple[str, list[dict[str, Any]], dict[str, list[str]]]:
     """Bejelentkezes, torrentek, es (ha kell) a fajllistak lekerese."""
     client.login()
     version = client.version()
     torrents = client.torrents()
-    files_by_hash: dict[str, list[dict[str, Any]]] = {}
-    if pontos:
-        kellenek = erintett_torrentek(torrents, futas.targets, futas.beallitas)
-        if kellenek:
-            print(f"Fajllista lekerese {len(kellenek)} torrenthez "
-                  f"({len(torrents) - len(kellenek)} mas konyvtarban van)...")
-            files_by_hash = client.files_many(kellenek)
+    files_by_hash: dict[str, list[str]] = {}
+    kellenek = kell_fajllista(torrents, futas.targets, futas.beallitas, pontos)
+    if kellenek:
+        print(f"Fajllista lekerese {len(kellenek)} torrenthez "
+              f"({len(torrents)} kozul)...")
+        files_by_hash = client.files_many(kellenek)
     return version, torrents, files_by_hash
 
 
@@ -1495,7 +1637,7 @@ def _fejlec(client: QbtClient, version: str, torrents: Sequence[Torrent],
 
 
 def _atnezes(torrents: Sequence[Torrent],
-             files_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
+             files_by_hash: Mapping[str, Sequence[str]],
              futas: _Futas) -> list[Candidate]:
     """A konyvtarak atnezese, a menet kozbeni gondok kiirasaval."""
     gondok: list[str] = []
