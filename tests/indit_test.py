@@ -93,15 +93,31 @@ check("a pip parancs a fajlra mutat",
       str(valodi) in [str(x) for x in hivasok[0]], True)
 
 hivasok, sikeres = [], [False, True]
-eredmeny, kiirt = csendben(indit.csomagok_telepitese, valodi)
+eredmeny, kiirt = csendben(indit.csomagok_telepitese, valodi, venvben=False)
 check("ha nem megy, felhasznaloi modban ujraprobalja",
       (eredmeny, len(hivasok)), (True, 2))
 check("a masodik probaban ott a --user", "--user" in hivasok[1], True)
 
+# Sajat kornyezetben a --user telepites nem letezik: ott a pip hianyzik,
+# azt az ensurepip potolja.
+hivasok, sikeres = [], [False, True, True]
+eredmeny, kiirt = csendben(indit.csomagok_telepitese, valodi, venvben=True)
+check("sajat kornyezetben nem --user-rel probal",
+      (eredmeny, len(hivasok)), (True, 3))
+check("hanem az ensurepip-pel", "ensurepip" in hivasok[1], True)
+check("es utana ujra telepit", hivasok[2], hivasok[0])
+check("a --user meg sem jelenik",
+      any("--user" in p for p in hivasok), False)
+
 hivasok, sikeres = [], [False, False]
-eredmeny, kiirt = csendben(indit.csomagok_telepitese, valodi)
+eredmeny, kiirt = csendben(indit.csomagok_telepitese, valodi, venvben=False)
 check("ha egyik sem megy, hibat jelez", eredmeny, False)
 check("es kiirja a hibat", "[HIBA]" in kiirt, True)
+
+# A "hol futunk" kerdes magatol is eldol: a teszt csak azt nezi, hogy a
+# valasz a Python sajat adataibol jon (sys.prefix / sys.base_prefix).
+check("a sajat kornyezet felismerese logikai valasz",
+      isinstance(indit.sajat_kornyezetben(), bool), True)
 
 # --- teljes ellenorzes ------------------------------------------------------
 
@@ -142,6 +158,39 @@ indit.ITT = regi_itt
 
 eredmeny, kiirt = csendben(indit.main, indit=False)
 check("main indites nelkul: rendben", eredmeny, 0)
+
+# Ellenorzo modban (indit=False) a kornyezet-valtas sem indul el: a valtas
+# ugyanezt a fajlt inditana ujra, es ott mar felulet is nyilna.
+regi_valtas = indit.kornyezet_valtas
+indit.kornyezet_valtas = lambda: 3
+eredmeny, kiirt = csendben(indit.main, indit=False)
+check("ellenorzo modban nem valt kornyezetet", eredmeny, 0)
+indit.kornyezet_valtas = regi_valtas
+
+# A sajat kornyezetre valtas: ha megtortent, a gyerekfolyamat kilepesi kodja
+# jon vissza, es itt mar nem futtatunk semmit.
+regi_valtas = indit.kornyezet_valtas
+indit.kornyezet_valtas = lambda: 3
+eredmeny, kiirt = csendben(indit.main, indit=False, valtas=True)
+check("atvaltas utan a gyerek kodjaval terunk vissza", eredmeny, 3)
+check("es itt mar nem ellenorzunk semmit", "program fajljai" in kiirt, False)
+
+indit.kornyezet_valtas = lambda: None
+eredmeny, kiirt = csendben(indit.main, indit=False, valtas=True)
+check("ha nem kellett valtani, itt folytatjuk", eredmeny, 0)
+check("es lefutnak az ellenorzesek", "program fajljai" in kiirt, True)
+indit.kornyezet_valtas = regi_valtas
+
+# Tul regi Python eseten meg a kornyezet-valtas elott megallunk: azt a
+# kornyezetet is ez a Python keszitene el.
+regi_verzio = indit.MIN_VERZIO
+indit.MIN_VERZIO = (99, 0)
+indit.kornyezet_valtas = lambda: 3
+eredmeny, kiirt = csendben(indit.main, indit=False, valtas=True)
+check("tul regi Python: nem is probal kornyezetet valtani", eredmeny, 1)
+check("es megmondja, mi a baj", "Tul regi" in kiirt, True)
+indit.MIN_VERZIO = regi_verzio
+indit.kornyezet_valtas = regi_valtas
 indit.hianyzo_modulok = regi_hianyzo
 
 shutil.rmtree(str(tmp), ignore_errors=True)

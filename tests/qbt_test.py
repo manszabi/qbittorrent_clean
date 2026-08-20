@@ -7,10 +7,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import email.message
+import http.server
 import io
 import os
 import shutil
+import ssl
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -148,6 +151,26 @@ win_torrent = [{"hash": "w", "name": "Film", "save_path": "D:\\letoltes",
 win_roots, _ = q.owned_paths(win_torrent, {}, [], "D:\\letoltes")
 check("owned_paths: Windows-utvonal megfeleltetes nelkul is egyezik",
       sorted(win_roots), ["d:/letoltes/film"])
+# A takaritas minden bejegyzes kulcsat a szuloje kulcsabol allitja elo (ez a
+# gyors ut). Ha ez barmiben elternene a teljes utvonal kulcsatol, egy
+# torrenthez tartozo fajlt feleslegesnek latna a program - ezert a ketto
+# egyezeset kulon ellenorizzuk, a nehez neveken is.
+szulok = ["/mnt/downloads", "/mnt/downloads/", "//gep/megosztas", "/",
+          "C:/letoltes", "\\\\gep\\megosztas\\rss", "/mnt/ekezetes konyvtar"]
+kulonos_nevek = ["film.mkv", "Ekezetes Nev.mkv", "a\\b", "NAGY.BETU.MKV",
+                 unicodedata.normalize("NFD", "arvizturo.mkv"),
+                 "pont.a.vegen.", "szokoz a vegen ", "tab\tos", "emoji-x.mkv",
+                 "Strasse.mkv"]
+elteres = [
+    (szulo, nev)
+    for kis_nagy in (True, False)
+    for szulo in szulok
+    for nev in kulonos_nevek
+    if q.gyerek_kulcs(q.path_key(szulo, kis_nagy), q.norm_key(nev, kis_nagy))
+    != q.path_key(Path(szulo) / nev, kis_nagy)
+]
+check("gyerek_kulcs: ugyanaz, mint a teljes utvonal kulcsa", elteres, [])
+
 check("kesz_kulcs: a .!qB vegzodest levagja",
       q.kesz_kulcs(q.norm_key("Film.mkv" + q.INCOMPLETE_SUFFIX)), "film.mkv")
 check("kesz_kulcs: mast nem bant", q.kesz_kulcs(q.norm_key("Film.mkv")), "film.mkv")
@@ -179,6 +202,65 @@ try:
     check("elerhetetlen kiszolgalo", "nem dobott hibat", "QbtError")
 except q.QbtError:
     check("elerhetetlen kiszolgalo", "QbtError", "QbtError")
+
+# ------------------------------------------ onalairt tanusitvany (https)
+#
+# Otthoni NAS-on a WebUI tanusitvanya szinte mindig onalairt. Ket dolgot kell
+# tudni a programrol: alapbol ELLENORZI a tanusitvanyt (kulonben a "biztonsagos"
+# kapcsolat semmit nem erne), es a kulon keresre (--nem-biztonsagos-tls, illetve
+# a feluleten a jelolonegyzet) valoban atengedi.
+#
+# A tanusitvanyt a teszt keszitteti el az opensslel: igy nincs a repoban
+# privat kulcs, es nincs lejaro fixture sem. Ahol nincs openssl, a szakasz
+# kimarad - a gepet nem minositjuk.
+
+tls_tmp = Path(tempfile.mkdtemp(prefix="qbt-tls-teszt-"))
+tanusitvany, kulcs = tls_tmp / "cert.pem", tls_tmp / "kulcs.pem"
+try:
+    van_openssl = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(kulcs),
+         "-out", str(tanusitvany), "-days", "2", "-nodes", "-subj",
+         "/CN=localhost"],
+        capture_output=True, check=False).returncode == 0
+except OSError:  # pragma: no cover - openssl nelkuli gep
+    van_openssl = False
+
+if not van_openssl:  # pragma: no cover - openssl nelkuli gep
+    print("FIGYELEM: nincs openssl, a https-szakasz kimarad")
+else:
+    class TlsKezelo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # a BaseHTTPRequestHandler adta nev
+            valasz = b"v4.6.5"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(valasz)))
+            self.end_headers()
+            self.wfile.write(valasz)
+
+        def log_message(self, *_a):
+            pass
+
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(str(tanusitvany), str(kulcs))
+    tls_kiszolgalo = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TlsKezelo)
+    tls_kiszolgalo.socket = tls_ctx.wrap_socket(tls_kiszolgalo.socket,
+                                                server_side=True)
+    threading.Thread(target=tls_kiszolgalo.serve_forever, daemon=True).start()
+    tls_url = f"https://127.0.0.1:{tls_kiszolgalo.server_address[1]}"
+
+    szigoru = q.QbtClient(tls_url, "", "", q.Halozat(timeout=5, probak=1))
+    try:
+        szigoru.version()
+        check("onalairt tanusitvany: alapbol elutasitja", "atengedte", "QbtError")
+    except q.QbtError as exc:
+        check_true("onalairt tanusitvany: alapbol elutasitja",
+                   "certificate" in str(exc).lower(), exc)
+
+    engedekeny = q.QbtClient(tls_url, "", "",
+                             q.Halozat(timeout=5, probak=1, insecure=True))
+    check("kulon keresre viszont atengedi", engedekeny.version(), "v4.6.5")
+    tls_kiszolgalo.shutdown()
+
+shutil.rmtree(str(tls_tmp), ignore_errors=True)
 
 # --------------------------------------------- hibatures: ujraprobalkozas
 #
@@ -397,6 +479,28 @@ check("fa+pontos mod: a felkesz fajlt is megtartja",
       any(q.INCOMPLETE_SUFFIX in str(c.path) for c in cands), False)
 felkesz.unlink()
 felkesz_gyoker.unlink()
+
+# --- a program sajat mappaja: sosem felesleges elem
+#
+# Van, aki a takaritot magaba a letoltesi konyvtarba teszi ki. A mappaja
+# egyetlen torrenthez sem tartozik, tehat "feleslegesnek" latszana - pedig
+# eppen az a program (a beallitasaival, a naplojaval, a .venv-jevel).
+
+sajat = share / "qbittorrent_clean"
+sajat.mkdir()
+(sajat / "qbt_cleanup.py").write_bytes(b"")
+regi_program = q.PROGRAM_KONYVTAR
+q.PROGRAM_KONYVTAR = sajat
+sajat_terv = q._Terv.keszit(q.Beallitas(), [rss], q.Figyelo())
+sajat_jeloltek = q.plan_toplevel(share, names, sajat_terv)
+check("a program sajat mappajat nem ajanlja torlesre",
+      [c for c in sajat_jeloltek if c.path.name == "qbittorrent_clean"], [])
+q.PROGRAM_KONYVTAR = regi_program
+sajat_terv = q._Terv.keszit(q.Beallitas(), [rss], q.Figyelo())
+check("mashonnan futtatva viszont felesleges elem",
+      [c.path.name for c in q.plan_toplevel(share, names, sajat_terv)
+       if c.path.name == "qbittorrent_clean"], ["qbittorrent_clean"])
+shutil.rmtree(sajat)
 
 # --- min-kor: a frissen modositott elemet meghagyja
 cands = q.plan_toplevel(share, names, T(protected=[rss], min_age_days=1))

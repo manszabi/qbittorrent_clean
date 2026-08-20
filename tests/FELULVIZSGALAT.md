@@ -181,3 +181,163 @@ terhelés és mérések (terheles_test.py)    14 / 14
 
 `ruff check .` – tiszta, a pylint-szabályokkal (`PL`) együtt.
 A teljes készlet Python 3.10-től 3.14-ig fut (GitHub Actions).
+
+---
+
+## 5. Harmadik kör: saját környezet, típusellenőrzés, gyorsabb átnézés
+
+Ebben a körben három kért fejlesztés készült el (saját `.venv`, a felület
+hálózati beállításai, `mypy` a CI-ben), majd egy újabb hibakeresési és
+teljesítmény-átnézés következett.
+
+### 5.1 Saját Python környezet (`.venv`)
+
+A program a saját mappájában készít egy `.venv` környezetet, és **mindig abban
+fut** – Windowson és Linuxon egyaránt. A belépési pontok (`indit.py`,
+`qbt_gui.py`, `qbt_cleanup.py`) első dolga megnézni, hogy a `.venv`
+értelmezőjével futnak-e; ha nem, ugyanazt a fájlt indítják újra onnan.
+
+Amire figyeltünk:
+
+| Kérdés | Válasz |
+|---|---|
+| Miért alfolyamat, és nem `os.execv`? | Windowson az `execv` nem lecseréli a folyamatot, hanem újat indít és a régit kilépteti: a hívó parancsfájl azonnal visszakapná a vezérlést, és „kész"-t írna, miközben a program még fut. |
+| Mi történik a kilépési kóddal? | Változatlanul továbbmegy (teszt: a gyerek `7`-tel lép ki, a hívó is `7`-et ad). Az ütemezett futtatás számára tehát semmi nem változik. |
+| Végtelen lánc? | A gyerek környezetében ott a `QBT_VENV_ATVALTVA` jelző, és a `sys.prefix` is a `.venv`-re mutat – két, egymástól független fék. |
+| Ha nem hozható létre? | Nem áll le: figyelmeztet, és a rendszer Pythonjával megy tovább (Debian/Ubuntu alatt ki is írja, hogy `python3-venv` kell). |
+| Ha a `venv` modulban nincs `pip`? | Másodszorra `--without-pip` alakban is megpróbálja: a takarítónak nincs külső függősége, annak az is tökéletes. |
+| Csomagtelepítés | A saját környezetben a `--user` telepítés értelmetlen (a pip vissza is utasítja): ott a hiányzó `pip`-et az `ensurepip` pótolja, és csak a rendszer Pythonjánál marad a `--user`. |
+| „Frissítettem a Pythont, és azóta nem indul" | A `.venv` a `pyvenv.cfg` `home` sorából találja meg az alap Pythont. Ha az már nincs meg, a program ezt **indítás előtt** észreveszi (egy fájl beolvasása, nem folyamatindítás), és újraépíti a környezetet. |
+| Ha a mappa nem írható? | (Pl. `Program Files` alatt.) Ezt a program **előre** megnézi, és nem indít fölöslegesen alfolyamatot minden egyes induláskor: egyszer szól, és a rendszer Pythonjával megy tovább. |
+| Kikapcsolás | `QBT_VENV_KIHAGY=1` – ezt használja a tesztkészlet és a CI is. |
+| Ellenőrző mód | Az `indit.main(indit=False)` (csak ellenőrzés) **nem** vált környezetet: a váltás ugyanezt a fájlt indítaná újra, és ott már felület is nyílna. |
+
+Ára: egy mappával több (kb. 30 MB), és az első indítás pár másodperccel
+hosszabb. A további indítások költsége mérve **0,1 mp** (a kész környezet
+felismerése egyetlen fájlrendszer-kérdés, nem folyamatindítás).
+
+### 5.2 A felület hálózati beállításai
+
+Az időkorlát és az önaláírt tanúsítvány elfogadása eddig csak parancssorból
+volt elérhető (`--idokorlat`, `--nem-biztonsagos-tls`) – a felület mindig a
+gyári értékekkel dolgozott. Most mindkettő ott van a kapcsolat-dobozban, a
+beállítás-fájlba is elmentődik, és a *Kapcsolat próba* is, a vizsgálat is
+ugyanazt a `Halozat` példányt kapja meg (erre külön teszt figyel: a kliens
+tényleg a beállított értékekkel készül el). A kikapcsolt
+tanúsítvány-ellenőrzést a felület **kiírja** – ez valós kockázat, nem
+történhet csendben.
+
+### 5.3 `mypy` a CI-ben
+
+A `ruff` a nyelvtant és a stílust nézi, a `mypy` a típusokat. A beállítás a
+`pyproject.toml`-ban van (`strict`), a CI-ben külön job futtatja, kötött
+verzióval (egy új `mypy` új ellenőrzésekkel jön, és azok egy változatlan kódot
+is elbuktatnának – a frissítés legyen döntés, ne véletlen).
+
+Amit a `mypy` talált (mind valódi, mind javítva): a HTTP-válasz `Any`-ként ment
+tovább, a jelszó típusa az `argparse` `Namespace`-éből `Any` volt, az
+üzenet-kezelők szótárának nem volt típusa, a felület `tk.Misc`-et várt, pedig
+`tk.Tk`-ra jellemző hívásokat használ, és a `Listbox.curselection()` visszatérési
+értéke a tkinter leírásában ismeretlen (most egy központi segédfüggvény rögzíti,
+és mindjárt a törléshez illő, csökkenő sorrendben adja vissza).
+
+Az `indit.py` kivétel a `strict` alól: szándékosan régi nyelvtannal,
+típus-annotációk nélkül készült, hogy egy túl régi Python is le tudja
+fordítani, és érthető üzenetet adhasson a verzióról.
+
+### 5.4 A harmadik körben talált hiányosságok
+
+| # | Hiányosság | Következmény | Javítás |
+|---|---|---|---|
+| 1 | A méretet és a kort **külön-külön** kérdezte meg a fájlrendszertől (`os.stat`), pedig a könyvtár beolvasásakor kapott bejegyzés (`DirEntry`) ezt már tudja | Windowson (Samba megosztás) fájlonként egy fölösleges hálózati forduló; mérve 20 000 fájlnál **40 611** helyett **20 609** `stat` hívás | `bejegyzes_adatai()` + `fiatal()`: egy kérdés, két döntés |
+| 2 | Minden bejegyzéshez felépítette a **teljes útvonalat**, és abból számolt összehasonlítási kulcsot | Elemenként 5,4 µs olyan munkára, ami a szülő kulcsából 0,4 µs | `gyerek_kulcs()`; az útvonal-objektum csak a valóban felesleges elemekhez készül el |
+| 3 | A program **saját mappája** nem volt védve | Aki a takarítót magába a letöltési könyvtárba teszi, annak a mappája egyetlen torrenthez sem tartozik: „feleslegesnek" látszott volna – a beállításaival, a naplójával és a `.venv`-jével együtt | `PROGRAM_KONYVTAR` mindig a védett elemek között (teszt mindkét irányban) |
+| 4 | A felület nem szűrte a **kétszer felsorolt** könyvtárat | Kézzel átírt beállítás-fájlból ugyanaz a könyvtár kétszer is bekerülhetett: olyankor megvédené önmagát, és a vizsgálat üres lenne. A parancssoros változat ezt már szűrte – a kettő nem tért el egymástól szándékosan | a felület is `path_key` szerint szűr |
+| 5 | A `--idokorlat` és a `--nem-biztonsagos-tls` nem volt elérhető a felületen | lásd 5.2 | – |
+
+### 5.5 Mérések (harmadik kör)
+
+| Mérés | Előtte | Utána |
+|---|---|---|
+| `stat` hívások 20 000 fájlra (`--min-kor` mellett) | 40 611 | **20 609** |
+| felső mód, 20 000 bejegyzés | 0,286 mp | **0,246 mp** |
+| összehasonlítási kulcs elemenként | 5,4 µs | **0,4 µs** |
+| fa mód, 40 000 bejegyzés, rendezett megosztás | 0,221 mp | **0,104 mp** |
+| indítás a kész `.venv`-vel (alfolyamat is benne) | – | 0,1 mp |
+
+A „rendezett megosztás" az életszerű eset: a fájlok többségéhez tartozik
+torrent, a program tehát a bejegyzések nagy részén csak „átlép". A terhelési
+teszt ezt külön mérésként is őrzi.
+
+### 5.6 Amit megnéztünk, és **nem** kellett javítani
+
+- **Hosszú útvonalak és a `DirEntry.stat()`**: Windowson a bejegyzés adatai a
+  könyvtár beolvasásából származnak, tehát a `stat` ott **egyáltalán nem** nyúl
+  az útvonalhoz – a 260 karakteres korlát nem érinti. (A könyvtárak méretét
+  számoló `entry_size()` továbbra is a `\?\` előtagos alakot használja.)
+- **A `gyerek_kulcs` és a `path_key` egyezése**: külön teszt hasonlítja össze a
+  kettőt nehéz neveken (kétféle ékezet-kódolás, kis/nagybetű, visszafelé dőlő
+  perjel a fájlnévben, UNC és gyökér szülő). Ez azért fontos, mert egy eltérő
+  kulcs azt jelentené, hogy egy torrenthez tartozó fájlt feleslegesnek látunk.
+- **Egyszerre induló két példány** (ütemezett futás és kézi indítás ugyanabban
+  a másodpercben, a legelső indításkor) elvileg egyszerre kezdhet `.venv`-et
+  építeni. A `python -m venv` nem töröl, csak felülír, és a következő indítás
+  magától helyrehozza – ezért maradt a helyben építés: így az `activate`
+  parancsfájlokban a valódi útvonal szerepel.
+- **A `https` és az önaláírt tanúsítvány**: a teszt `openssl`-lel készíttet egy
+  tanúsítványt, elindít egy valódi TLS-kiszolgálót, és mindkét irányt
+  ellenőrzi: alapból **elutasítja** az önaláírt tanúsítványt (különben a
+  „biztonságos" kapcsolat semmit nem érne), külön kérésre viszont átengedi. Így
+  a repóban nincs privát kulcs, és nincs lejáró fixture sem.
+- **A `--probak`, `--szalak` és `--max-torles`** ebben a körben még csak
+  parancssorból volt elérhető; a következő lépésben (5.8) ezek is bekerültek a
+  felületre, így a két felület kapcsolókészlete gyakorlatilag egyezik.
+
+### 5.7 Tesztek a harmadik kör után
+
+```
+motor (qbt_test.py)                      160 / 160
+felület (gui_test.py, Xvfb)              119 / 119
+törlési és eseménynapló (naplo_test.py)   49 / 49
+indító (indit_test.py)                    39 / 39
+saját környezet (kornyezet_test.py)       34 / 34
+Windows 11 (windows_test.py)              33 / 33
+parancsfájlok (bat_test.py)               21 / 21
+terhelés és mérések (terheles_test.py)    16 / 16
+összesen                                 471 / 471
+```
+
+`ruff check .` – tiszta. `mypy` – tiszta (`strict`).
+A teljes készlet Python 3.10-től 3.14-ig fut (GitHub Actions).
+
+### 5.8 A maradék három kapcsoló a felületen
+
+A `--probak`, a `--szalak` és a `--max-torles` is bekerült a felületre:
+
+| Felületen | Parancssorból | Hol |
+|---|---|---|
+| Újrapróbálkozás (db) | `--probak` | qBittorrent WebUI doboz |
+| Párhuzamos lekérdezés | `--szalak` | qBittorrent WebUI doboz |
+| Biztonsági határ (elem) | `--max-torles` | Beállítások doboz (`0` = nincs határ) |
+
+Amire figyeltünk:
+
+- **A pörgetőmezőbe kézzel is lehet írni** (a Tk ezt nem akadályozza meg),
+  ezért a határokat nem csak a widget, hanem az ellenőrzés is nézi: az
+  újrapróbálkozás 1–10 (a várakozás duplázódik, tíz próbálkozás már negyed
+  óra), a szálszám 1 és a motor `MAX_SZALAK` értéke között, a biztonsági határ
+  pedig nem lehet negatív.
+- **A biztonsági határ a törlés előtt fog**, még a megerősítő kérdés előtt: ha
+  több elem gyűlt össze, a program meg sem kérdezi, hanem megmondja, mit
+  tehetsz (vegyél ki a kipipáltakból, vagy emeld meg a határt). Az
+  eseménynaplóba is bekerül.
+- **A mezők ellenőrzése átállt kivételre.** Eddig mindegyik ellenőrzés egy
+  „(rendben van-e, érték)" párt adott vissza, és a hívó mezőnként egy
+  elágazással vizsgálta – nyolc mezőnél ez már nyolc egyforma elágazás lett
+  volna, és pont egy kimaradó elágazástól indulna el a munka hibás adatokkal.
+  Most mindegyik ellenőrzés ott írja ki a hibát, ahol felismeri, és
+  `MezoHiba`-val áll meg; a hívóban egyetlen `try` van.
+
+Tesztek: a három mező alapértéke, a határok mindkét széle, a hibás érték
+elutasítása (a kapcsolat-próba ilyenkor el sem indul), a mentés/betöltés, és
+maga a biztonsági fék – a határ felett meg sem kérdez, a határon még dolgozik.

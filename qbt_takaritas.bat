@@ -11,6 +11,9 @@ rem      set "TOROL=--torol --igen"
 rem  Az --igen azert kell, mert utemezett futtataskor nincs, aki valaszoljon a
 rem  megerosito kerdesre - enelkul a program inkabb leall.
 rem
+rem  A program itt is a sajat .venv kornyezeteben fut: ha meg nincs,
+rem  a qbt_cleanup.py elso dolga elkesziteni.
+rem
 rem  Ekezetet szandekosan nem tartalmaz, es nincs benne tobbsoros zarojeles
 rem  blokk sem - lasd a qbittorrent_clean.bat magyarazatat.
 rem ---------------------------------------------------------------------------
@@ -48,7 +51,7 @@ rem Kikapcsolas:       set "NAPLO=--nincs-naplo"
 set "NAPLO="
 
 echo ============================================================
-echo   qBittorrent takarito - parancssor   [indito v3]
+echo   qBittorrent takarito - parancssor   [indito v4]
 echo ============================================================
 echo.
 

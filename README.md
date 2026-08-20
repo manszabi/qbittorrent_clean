@@ -9,6 +9,8 @@ fájlokat és könyvtárakat, **amikhez már nem tartozik torrent**, és törli 
 
 - **grafikus felület** és parancssoros használat is,
 - csak `python3` kell hozzá (3.10+), **külső csomag nélkül**,
+- a saját **`.venv`** környezetében fut (Windowson és Linuxon egyaránt), amit
+  az első indításkor magának készít el,
 - **alapból semmit nem töröl**, csak kiírja, mit törölne,
 - a tényleges törléshez `--torol` kell, és megerősítést kér (`--igen` kihagyja),
 - törlés helyett tud **kukába** is mozgatni (`--kuka`),
@@ -22,9 +24,11 @@ elintéz:
 
 - megkeresi a Pythont (`py` launcher, majd `python`),
 - ellenőrzi a verziót (3.10 vagy újabb kell),
+- **elkészíti a saját `.venv` környezetet** a program mappájában (egyszeri,
+  pár másodperc), és onnantól mindig abban fut,
 - ellenőrzi a szükséges modulokat (`tkinter` és a szabvány könyvtár),
-- ha a `requirements.txt`-ben van külső csomag, **telepíti** (ha a rendszerszintű
-  telepítés nem megy, `--user` módban újrapróbálja),
+- ha a `requirements.txt`-ben van külső csomag, **telepíti** – a saját
+  környezetbe, tehát a rendszer Pythonjához nem nyúl,
 - majd elindítja a grafikus felületet.
 
 Maga a `.bat` szándékosan csak a Pythont keresi meg, minden ellenőrzés az
@@ -32,18 +36,53 @@ Maga a `.bat` szándékosan csak a Pythont keresi meg, minden ellenőrzés az
 blokk és LF sorvég együtt menet közbeni, félrevezető hibákat okoz, ezért a
 parancsfájlban egyik sincs.)
 
+### A saját környezet (`.venv`)
+
+A program a saját mappájában készít egy `.venv` könyvtárat, és **mindig abban
+fut** – mindegy, hogy Windowson a `.bat`-ról, vagy Linuxon a
+`python3 qbt_gui.py` paranccsal indítod. A belépési pontok (`indit.py`,
+`qbt_gui.py`, `qbt_cleanup.py`) első dolga megnézni, hogy a `.venv`
+értelmezőjével futnak-e; ha nem, ugyanazt a fájlt újraindítják onnan,
+változatlan kapcsolókkal. A kimenet és a kilépési kód a hívóé marad, tehát az
+ütemezett futtatás számára sem változik semmi.
+
+Miért jó ez: a takarító mindenhol ugyanazzal a Pythonnal és ugyanazokkal a
+csomagokkal fut, és nem tud elromlani attól, hogy valaki a rendszer Pythonjában
+telepít vagy töröl valamit. Cserébe egy mappával több van (`.venv`, kb. 30 MB), az első indítás pedig
+pár másodperccel hosszabb; a későbbi indítások költsége mérve 0,1 mp.
+
+Ha nem hozható létre (nincs írási jog a mappára, vagy a disztribúció külön
+csomagba tette a `venv`-et: `sudo apt install python3-venv`), a program **nem
+áll le**: figyelmeztet, és a rendszer Pythonjával megy tovább.
+
+Kikapcsolás – fejlesztéshez, CI-hez, vagy ha magad kezeled a környezetet:
+
+```bash
+QBT_VENV_KIHAGY=1 python3 qbt_gui.py
+```
+
 ## A grafikus felület
 
 Fentről lefelé:
 
 1. **qBittorrent WebUI** – cím, felhasználó, jelszó. A *Kapcsolat próba* gomb
    megmondja, hány torrentet lát. A jelszó csak akkor mentődik el (sima
-   szövegként), ha külön bepipálod.
+   szövegként), ha külön bepipálod. Itt van az **időkorlát** (alapból 30 mp, a
+   parancssori `--idokorlat` párja) és az **önaláírt tanúsítvány elfogadása**
+   is (`--nem-biztonsagos-tls`): ez utóbbi `https`-nél kikapcsolja a
+   tanúsítvány ellenőrzését – otthoni NAS-nál sokszor ez az egyetlen járható
+   út, de a felület ki is írja, hogy ilyenkor a forgalom nem védett a hálózat
+   közepén ülő ellen. Itt állítható az **újrapróbálkozás** (`--probak`) és a
+   **párhuzamos lekérdezés** szálszáma is (`--szalak`): egy akadozó hálózaton
+   az előbbi menti meg a takarítást, egy gyenge NAS-t viszont az utóbbi
+   megfektethet. Mind a beállításokkal együtt mentődik.
 2. **Vizsgált könyvtárak** – *Tallózás…* vagy *Beírom…* (hálózati útvonalhoz ez
    utóbbi a kényelmesebb: `\\192.168.1.38\downloads`). Sorolj fel minden
    letöltési könyvtárat, az egymásba ágyazottakat is – **védik egymást**.
-3. **Beállítások** – üzemmód, kivételek, „csak ennél régebbi”, kuka, és a
-   `fa` módhoz az útvonal-megfeleltetések.
+3. **Beállítások** – üzemmód, kivételek, „csak ennél régebbi”, kuka,
+   **biztonsági határ** (a `--max-torles` párja: ha ennél több elem gyűlne
+   össze, a program meg sem kérdezi, hogy törölheti-e – `0` = nincs határ),
+   és a `fa` módhoz az útvonal-megfeleltetések.
 4. **Mit törölne? (próba)** – ez még nem töröl semmit, csak listáz.
 5. A találati lista minden sora **kipipálható**: kattints a bal szélső ✓
    oszlopra, vagy használd a *Mindet ki/be* gombot. A **Kipipáltak törlése**
@@ -235,6 +274,10 @@ kapcsolja ki (a törlési naplóval együtt).
   **nem töröl semmit**.
 - A gyökérkönyvtárat (`/`, `C:\`) nem hajlandó takarítani; a megosztás gyökere
   (`\\gép\megosztás`) viszont rendben van.
+- A **saját mappáját** sosem törli. Ha valaki a takarítót magába a letöltési
+  könyvtárba teszi ki, a mappája egyetlen torrenthez sem tartozik, tehát
+  „feleslegesnek" látszana – pedig éppen az a program, a beállításaival, a
+  naplójával és a `.venv` környezetével együtt.
 - A **260 karakternél hosszabb** útvonalakat is kezeli Windowson (a hosszú
   kiadási nevek egy `Subs` almappával könnyen átlépik ezt a határt).
 - Ha egy **alkönyvtárat nem tud beolvasni** (jogosultság, hálózati akadás),
@@ -263,13 +306,14 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | Fájl | Mi ez |
 |------|-------|
 | `qbittorrent_clean.bat` | **Windows-indító**: megkeresi a Pythont, és átadja a vezérlést az `indit.py`-nak. Ezt kattintsd. |
-| `indit.py` | A függőség-ellenőrzés: verzió, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
+| `indit.py` | A függőség-ellenőrzés: verzió, saját környezet, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
+| `qbt_kornyezet.py` | A saját `.venv` környezet: létrehozás, és a belépési pontok átváltása rá. |
 | `qbt_gui.py` | A grafikus felület (Tkinter). |
 | `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható (a `qbt_naplo.py` legyen mellette). |
 | `qbt_naplo.py` | A törlési napló: sorok írása, heti / méret szerinti rotálás, tömörítés. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
-| `pyproject.toml` | A fejlesztői eszközök (ruff) beállítása; a program telepítés nélkül fut. |
+| `pyproject.toml` | A fejlesztői eszközök (`ruff`, `mypy`) beállítása; a program telepítés nélkül fut. |
 | `tests/` | Tesztkészlet (lásd lent) és a felülvizsgálati jegyzőkönyv. |
 
 ## Teszt
@@ -278,7 +322,15 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 tests/run_all.sh          # az egész készlet
 python3 tests/qbt_test.py # csak a motor (tkinter nélkül is megy)
 ruff check .              # stílus- és hibaellenőrzés
+mypy                      # típusellenőrzés (a beállítása a pyproject.toml-ban)
 ```
+
+A `mypy` a program moduljait `strict` módban nézi. Az `indit.py` kivétel:
+az szándékosan régi nyelvtannal, típus-annotációk nélkül készült, hogy egy
+túl régi Python is le tudja fordítani, és érthető üzenetet adjon a verzióról.
+A tesztek nincsenek benne: azok szándékosan cserélgetik a program belsejét
+(hamis párbeszédablak, lassított függvény, Windows-szimuláció), ott a
+típusellenőrzés csak zajt adna.
 
 Ugyanez fut a GitHubon is minden feltöltésnél
 (`.github/workflows/tesztek.yml`), a 3.10-től a 3.14-ig minden Python
@@ -295,8 +347,9 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 | Teszt | Mit vizsgál |
 |-------|-------------|
 | `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, minden `%VÁLTOZÓ%` létezik, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
-| `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
-| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
+| `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás (`--user`, illetve `ensurepip` a saját környezetben), hiányos mappa, átváltás a `.venv`-re. |
+| `kornyezet_test.py` | A saját `.venv`: útvonalak mindkét rendszerre, mikor kell átváltani, valódi környezet létrehozása és az, hogy a gyerekfolyamat tényleg abból indul. |
+| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás, és `https` önaláírt tanúsítvánnyal (alapból elutasítja, külön kérésre átengedi). |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
 | `windows_test.py` | Windows 11 specifikus szabályok Linuxon szimulálva: hosszú útvonalak (`\\?\`, UNC), meghajtó-gyökér, kis-nagybetű, kuka-nevek, `%APPDATA%`, DPI-tudatosság, cp852 konzolkódlap, a napló mappájának megnyitása. Ahol lehet, a CPython saját `ntpath` modulja a mérce. |
 | `terheles_test.py` | Terhelés és mérés: 8000 bejegyzésű megosztás mindkét módban, memóriacsúcs, párhuzamos fájllista-lekérés, a lekérdezendő torrentek szűrése,

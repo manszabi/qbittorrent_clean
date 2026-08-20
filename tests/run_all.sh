@@ -6,6 +6,10 @@
 set -u
 cd "$(dirname "$0")"
 
+# A tesztek a futtato kornyezetben dolgoznak: egyik se keszitsen maganak
+# .venv-et. (A kornyezet-tesztje ezt maga allitja at, ideiglenes mappaban.)
+export QBT_VENV_KIHAGY=1
+
 # A GUI-teszthez tkinter kell. Ha a PYTHON nincs megadva, megkeressuk az elso
 # olyan python3-at, amiben van tkinter (tobb gepen ez nem az alapertelmezett).
 PY="${PYTHON:-}"
@@ -33,6 +37,7 @@ run() {  # run <nev> <parancs...>
 
 run "parancsfajlok (*.bat)"  $PY bat_test.py
 run "indito (indit.py)"      $PY indit_test.py
+run "sajat kornyezet (.venv)" $PY kornyezet_test.py
 run "motor (qbt_cleanup.py)" $PY qbt_test.py
 run "torlesi naplo (qbt_naplo.py)" $PY naplo_test.py
 run "felulet (qbt_gui.py)"   $GUI gui_test.py

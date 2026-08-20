@@ -29,6 +29,10 @@ jobs:
       - name: Teljes tesztkeszlet
         env:
           PYTHON: python
+          # A tesztek a CI Pythonjaban fussanak: ne keszitsen mindegyik
+          # verziohoz sajat .venv-et (a kornyezet sajat tesztje ezt maga
+          # allitja at, ideiglenes mappaban).
+          QBT_VENV_KIHAGY: "1"
         run: tests/run_all.sh
 
   ruff:
@@ -40,3 +44,20 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - run: ruff check .
+
+  # Tipusellenorzes. A beallitasa (mit nez, milyen szigoruan) a
+  # pyproject.toml-ban van, ezert itt eleg a csupasz "mypy".
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      # A verzio kotve van: egy uj mypy uj ellenorzesekkel jon, es azok egy
+      # valtozatlan kodot is elbuktatnanak - a frissites legyen dontes, ne
+      # veletlen.
+      - run: pip install "mypy~=1.19.1"
+      # A tkinter tipusleirasa a mypy-vel erkezik (typeshed), a modult magat
+      # nem kell telepiteni hozza.
+      - run: mypy

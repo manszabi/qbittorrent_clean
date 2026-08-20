@@ -103,6 +103,18 @@ jeloltek = meres(f"fa mod, {KONYVTARAK * FAJLOK} bejegyzes",
 check("fa mod: a torrentes fajlok maradnak", len(jeloltek),
       KONYVTARAK * (FAJLOK - 1))
 
+# Eletszeru eset: a megosztas nagy resze torrentekhez tartozik, es csak par
+# elem felesleges. Ilyenkor a program a bejegyzesek tobbsegen csak "atlep" -
+# ezert eri meg, hogy az osszehasonlitasi kulcsot a szuloebol allitja elo, es
+# utvonal-objektumot csak a valoban felesleges elemekhez epit.
+MARADEK = 2
+rendezett = {q.path_key(melyfa / f"sorozat{k:03d}" / f"resz{f:03d}.mkv")
+             for k in range(KONYVTARAK) for f in range(FAJLOK - MARADEK)}
+jeloltek = meres(f"fa mod, rendezett megosztas ({KONYVTARAK * FAJLOK} bejegyzes)",
+                 lambda: q.plan_tree(melyfa, rendezett, dirs, terv), 15)
+check("rendezett megosztas: csak a felesleges elemek maradnak",
+      len(jeloltek), KONYVTARAK * MARADEK)
+
 shutil.rmtree(str(tmp), ignore_errors=True)
 
 # ------------------------------------------- sok torrent fajllistaja (CPU)

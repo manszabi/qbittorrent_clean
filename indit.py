@@ -10,6 +10,12 @@ tipus-annotacio), hogy egy tul regi Python is le tudja forditani, es ertheto
 uzenetet tudjon adni a verziorol - a tobbi fajl mar a mai nyelvtant hasznalja,
 azokat egy regi Python el sem tudna olvasni.
 
+A program a sajat mappajaban keszit egy virtualis kornyezetet (.venv), es
+abban fut - Windowson es Linuxon egyarant. Ez a fajl inditja el a valtast:
+eloszor a rendszer Pythonjaval fut le (mert azt hivja a parancsfajl), majd
+ugyanezt a fajlt ujrainditja a .venv ertelmezojevel. A csomagok is oda
+kerulnek, tehat a program sosem turkal a rendszer Pythonjaban.
+
 Kimenete szandekosan ekezet nelkuli: a Windows parancssor a rendszer
 kodlapjaval ir, es az ekezetes betuk ott konnyen szemette valnak.
 """
@@ -67,19 +73,37 @@ def csomag_sorok(utvonal):
     return [s.strip() for s in sorok if s.strip() and not s.strip().startswith("#")]
 
 
-def csomagok_telepitese(utvonal):
-    """pip install -r ..., ha kell. Igaz, ha minden rendben."""
+def sajat_kornyezetben():
+    """A most futo ertelmezo egy virtualis kornyezetbol jon-e."""
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+
+def csomagok_telepitese(utvonal, venvben=None):
+    """pip install -r ..., ha kell. Igaz, ha minden rendben.
+
+    A masodik proba attol fugg, hol vagyunk. Sajat kornyezetben a --user
+    telepites nem letezik (a pip vissza is utasitja), ott a pip hianya a
+    szokasos gond - azt az ensurepip potolja. A rendszer Pythonjanal
+    forditva: ott a jogosultsag szokott hianyozni, arra jo a --user."""
     if not csomag_sorok(utvonal):
         print("[OK]   Kulso csomag nem szukseges.")
         return True
+    if venvben is None:
+        venvben = sajat_kornyezetben()
     print("[..]   Kulso csomagok telepitese...")
     alap = [sys.executable, "-m", "pip", "install",
             "--disable-pip-version-check", "-r", utvonal]
     if _futtat(alap):
         print("[OK]   Csomagok rendben.")
         return True
-    print("[..]   Ujraprobalom felhasznaloi modban...")
-    if _futtat(alap[:4] + ["--user"] + alap[4:]):
+    if venvben:
+        print("[..]   A pip potlasa a sajat kornyezetben...")
+        masodik = _futtat([sys.executable, "-m", "ensurepip", "--upgrade"]) \
+            and _futtat(alap)
+    else:
+        print("[..]   Ujraprobalom felhasznaloi modban...")
+        masodik = _futtat(alap[:4] + ["--user"] + alap[4:])
+    if masodik:
         print("[OK]   Csomagok rendben.")
         return True
     print("[HIBA] Nem sikerult telepiteni a szukseges csomagokat.")
@@ -134,8 +158,47 @@ def ellenorzes():
     return True
 
 
-def main(indit=True):
+def kornyezet_valtas():
+    """Atvaltas a program sajat kornyezetere (.venv).
+
+    Vissza: a gyerekfolyamat kilepesi kodja, ha atvaltottunk - ilyenkor a
+    munkat mar ott vegeztuk el, itt csak tovabbadjuk a kodot. None, ha nem
+    kellett (mar a .venv-ben vagyunk, vagy nem sikerult letrehozni).
+
+    A qbt_kornyezet importja szandekosan itt van, nem a fajl elejen: az a
+    modul mar mai nyelvtannal keszult, egy tul regi Python el sem tudna
+    olvasni - a verzio-ellenorzes viszont pont azert van elotte, hogy ilyenkor
+    ertheto uzenetet adjunk."""
+    sys.path.insert(0, ITT)
+    import qbt_kornyezet
+    return qbt_kornyezet.belepes(os.path.join(ITT, "indit.py"), kiir=print)
+
+
+def main(indit=True, valtas=None):
+    """A teljes inditas. Az `indit` hamisra allitva csak ellenoriz (ezt
+    hasznalja a teszt), a `valtas` pedig a sajat kornyezetre valtast kapcsolja.
+
+    A `valtas` alapertelmezese szandekosan az `indit`: a kornyezetre valtas
+    ugyanezt a fajlt inditja el ujra, tehat ha a hivo eppen NEM akart
+    programot inditani, akkor a gyerekfolyamat sem indithat feluletet."""
+    if valtas is None:
+        valtas = indit
     keret("qBittorrent takarito")
+
+    # A verziot a kornyezet-valtas ELOTT nezzuk meg: a sajat kornyezetet is
+    # ez a Python keszitene, es egy tul regi Pythontol ertheto uzenet jar.
+    gond = verzio_gond()
+    if gond:
+        print("[HIBA] " + gond)
+        print("       Telepitsd a friss Pythont: "
+              "https://www.python.org/downloads/")
+        return 1
+
+    if valtas:
+        kod = kornyezet_valtas()
+        if kod is not None:
+            return kod
+
     if not ellenorzes():
         return 1
     if not indit:

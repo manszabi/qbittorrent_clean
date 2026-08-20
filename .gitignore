@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# A program sajat kornyezete: gepenkent kesziti el az indito.
+.venv/

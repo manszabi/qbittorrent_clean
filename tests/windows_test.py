@@ -173,7 +173,12 @@ check_true("mas rendszeren viszont nem az AppData szamit (akkor sem, ha be van "
 # A Tk alapbol nem DPI-tudatos, es a CPython Windows-manifestje sem allitja be
 # (csak a hosszu utvonalakat engedelyezi), ezert nekunk kell szolni a
 # rendszernek - kulonben 125-150%-os nagyitasnal minden betu elmosodott.
-import qbt_gui
+try:
+    import qbt_gui
+except ImportError as exc:  # pragma: no cover - tkinter nelkuli gep
+    qbt_gui = None
+    print(f"FIGYELEM: nincs tkinter ({exc}) - a feluletet erinto reszek "
+          "kimaradnak (DPI, fajlkezelo). A tobbi teszt fut.")
 
 hivasok = []
 
@@ -186,21 +191,22 @@ class HamisShcore:
 
 import ctypes
 
-regi_oledll = getattr(ctypes, "OleDLL", None)   # Linuxon nincs ilyen
-ctypes.OleDLL = lambda nev: HamisShcore()
-try:
-    with windowsnak_latszunk():
-        qbt_gui.dpi_tudatossag()
-    kint = list(hivasok)
-    qbt_gui.dpi_tudatossag()          # Linuxon nem szabad hivnia
-finally:
-    if regi_oledll is None:
-        del ctypes.OleDLL
-    else:
-        ctypes.OleDLL = regi_oledll
+if qbt_gui is not None:
+    regi_oledll = getattr(ctypes, "OleDLL", None)   # Linuxon nincs ilyen
+    ctypes.OleDLL = lambda nev: HamisShcore()
+    try:
+        with windowsnak_latszunk():
+            qbt_gui.dpi_tudatossag()
+        kint = list(hivasok)
+        qbt_gui.dpi_tudatossag()          # Linuxon nem szabad hivnia
+    finally:
+        if regi_oledll is None:
+            del ctypes.OleDLL
+        else:
+            ctypes.OleDLL = regi_oledll
 
-check("Windowson beallitja a DPI-tudatossagot", kint, [1])
-check("mas rendszeren nem nyul hozza", hivasok, [1])
+    check("Windowson beallitja a DPI-tudatossagot", kint, [1])
+    check("mas rendszeren nem nyul hozza", hivasok, [1])
 
 # --------------------------------------------------- 7. konzol es kodlapok
 
@@ -251,24 +257,26 @@ check("reconfigure nelkuli folyamon sem szall el", rendben, True)
 
 # Windowson az os.startfile a jaratos ut; mashol kulon folyamatban inditunk
 # fajlkezelot, hogy a felulet ne varjon ra.
-inditott = []
-regi_startfile = getattr(os, "startfile", None)
-os.startfile = inditott.append
-regi_kulon = qbt_gui.kulon_inditas
-qbt_gui.kulon_inditas = inditott.append
-osztaly = qbt_gui.TakaritoApp.__new__(qbt_gui.TakaritoApp)
-osztaly.v_naplo = type("V", (), {"get": staticmethod(lambda: str(tmp / "naplo.log"))})()
-try:
-    with windowsnak_latszunk():
-        qbt_gui.TakaritoApp.naplo_megnyitas(osztaly)
-finally:
-    qbt_gui.kulon_inditas = regi_kulon
-    if regi_startfile is None:
-        del os.startfile
-    else:
-        os.startfile = regi_startfile
-check("Windowson az os.startfile nyitja meg a naplo mappajat",
-      [str(x) for x in inditott], [str(tmp)])
+if qbt_gui is not None:
+    inditott = []
+    regi_startfile = getattr(os, "startfile", None)
+    os.startfile = inditott.append
+    regi_kulon = qbt_gui.kulon_inditas
+    qbt_gui.kulon_inditas = inditott.append
+    osztaly = qbt_gui.TakaritoApp.__new__(qbt_gui.TakaritoApp)
+    osztaly.v_naplo = type(
+        "V", (), {"get": staticmethod(lambda: str(tmp / "naplo.log"))})()
+    try:
+        with windowsnak_latszunk():
+            qbt_gui.TakaritoApp.naplo_megnyitas(osztaly)
+    finally:
+        qbt_gui.kulon_inditas = regi_kulon
+        if regi_startfile is None:
+            del os.startfile
+        else:
+            os.startfile = regi_startfile
+    check("Windowson az os.startfile nyitja meg a naplo mappajat",
+          [str(x) for x in inditott], [str(tmp)])
 
 import shutil
 

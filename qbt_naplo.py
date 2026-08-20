@@ -31,6 +31,7 @@ import shutil
 import sys
 import time
 from datetime import datetime, timedelta
+from io import TextIOWrapper
 from logging.handlers import BaseRotatingHandler, RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -114,7 +115,7 @@ class HetiMeretRotalo(BaseRotatingHandler):
         except OSError:
             return time.time()
 
-    def _open(self):  # a szulo visszateresi tipusat vesszuk at
+    def _open(self) -> TextIOWrapper:
         ures = (not os.path.exists(self.baseFilename)
                 or os.path.getsize(self.baseFilename) == 0)
         stream = super()._open()
