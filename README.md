@@ -72,12 +72,17 @@ Fentről lefelé:
    is (`--nem-biztonsagos-tls`): ez utóbbi `https`-nél kikapcsolja a
    tanúsítvány ellenőrzését – otthoni NAS-nál sokszor ez az egyetlen járható
    út, de a felület ki is írja, hogy ilyenkor a forgalom nem védett a hálózat
-   közepén ülő ellen. Mindkettő a beállításokkal együtt mentődik.
+   közepén ülő ellen. Itt állítható az **újrapróbálkozás** (`--probak`) és a
+   **párhuzamos lekérdezés** szálszáma is (`--szalak`): egy akadozó hálózaton
+   az előbbi menti meg a takarítást, egy gyenge NAS-t viszont az utóbbi
+   megfektethet. Mind a beállításokkal együtt mentődik.
 2. **Vizsgált könyvtárak** – *Tallózás…* vagy *Beírom…* (hálózati útvonalhoz ez
    utóbbi a kényelmesebb: `\\192.168.1.38\downloads`). Sorolj fel minden
    letöltési könyvtárat, az egymásba ágyazottakat is – **védik egymást**.
-3. **Beállítások** – üzemmód, kivételek, „csak ennél régebbi”, kuka, és a
-   `fa` módhoz az útvonal-megfeleltetések.
+3. **Beállítások** – üzemmód, kivételek, „csak ennél régebbi”, kuka,
+   **biztonsági határ** (a `--max-torles` párja: ha ennél több elem gyűlne
+   össze, a program meg sem kérdezi, hogy törölheti-e – `0` = nincs határ),
+   és a `fa` módhoz az útvonal-megfeleltetések.
 4. **Mit törölne? (próba)** – ez még nem töröl semmit, csak listáz.
 5. A találati lista minden sora **kipipálható**: kattints a bal szélső ✓
    oszlopra, vagy használd a *Mindet ki/be* gombot. A **Kipipáltak törlése**

@@ -289,24 +289,55 @@ teszt ezt külön mérésként is őrzi.
   ellenőrzi: alapból **elutasítja** az önaláírt tanúsítványt (különben a
   „biztonságos" kapcsolat semmit nem érne), külön kérésre viszont átengedi. Így
   a repóban nincs privát kulcs, és nincs lejáró fixture sem.
-- **A `--probak`, `--szalak` és `--max-torles` továbbra sem érhető el a
-  felületen.** Nem hiányosság: a felületen minden sor külön kipipálható, és a
-  törlés előtt a program megmutatja, mit fog csinálni – a parancssoros
-  biztonsági fékre ott nincs szükség.
+- **A `--probak`, `--szalak` és `--max-torles`** ebben a körben még csak
+  parancssorból volt elérhető; a következő lépésben (5.8) ezek is bekerültek a
+  felületre, így a két felület kapcsolókészlete gyakorlatilag egyezik.
 
 ### 5.7 Tesztek a harmadik kör után
 
 ```
 motor (qbt_test.py)                      160 / 160
-felület (gui_test.py, Xvfb)              104 / 104
+felület (gui_test.py, Xvfb)              119 / 119
 törlési és eseménynapló (naplo_test.py)   49 / 49
 indító (indit_test.py)                    39 / 39
 saját környezet (kornyezet_test.py)       34 / 34
 Windows 11 (windows_test.py)              33 / 33
 parancsfájlok (bat_test.py)               21 / 21
 terhelés és mérések (terheles_test.py)    16 / 16
-összesen                                 456 / 456
+összesen                                 471 / 471
 ```
 
 `ruff check .` – tiszta. `mypy` – tiszta (`strict`).
 A teljes készlet Python 3.10-től 3.14-ig fut (GitHub Actions).
+
+### 5.8 A maradék három kapcsoló a felületen
+
+A `--probak`, a `--szalak` és a `--max-torles` is bekerült a felületre:
+
+| Felületen | Parancssorból | Hol |
+|---|---|---|
+| Újrapróbálkozás (db) | `--probak` | qBittorrent WebUI doboz |
+| Párhuzamos lekérdezés | `--szalak` | qBittorrent WebUI doboz |
+| Biztonsági határ (elem) | `--max-torles` | Beállítások doboz (`0` = nincs határ) |
+
+Amire figyeltünk:
+
+- **A pörgetőmezőbe kézzel is lehet írni** (a Tk ezt nem akadályozza meg),
+  ezért a határokat nem csak a widget, hanem az ellenőrzés is nézi: az
+  újrapróbálkozás 1–10 (a várakozás duplázódik, tíz próbálkozás már negyed
+  óra), a szálszám 1 és a motor `MAX_SZALAK` értéke között, a biztonsági határ
+  pedig nem lehet negatív.
+- **A biztonsági határ a törlés előtt fog**, még a megerősítő kérdés előtt: ha
+  több elem gyűlt össze, a program meg sem kérdezi, hanem megmondja, mit
+  tehetsz (vegyél ki a kipipáltakból, vagy emeld meg a határt). Az
+  eseménynaplóba is bekerül.
+- **A mezők ellenőrzése átállt kivételre.** Eddig mindegyik ellenőrzés egy
+  „(rendben van-e, érték)" párt adott vissza, és a hívó mezőnként egy
+  elágazással vizsgálta – nyolc mezőnél ez már nyolc egyforma elágazás lett
+  volna, és pont egy kimaradó elágazástól indulna el a munka hibás adatokkal.
+  Most mindegyik ellenőrzés ott írja ki a hibát, ahol felismeri, és
+  `MezoHiba`-val áll meg; a hívóban egyetlen `try` van.
+
+Tesztek: a három mező alapértéke, a határok mindkét széle, a hibás érték
+elutasítása (a kapcsolat-próba ilyenkor el sem indul), a mentés/betöltés, és
+maga a biztonsági fék – a határ felett meg sem kérdez, a határon még dolgozik.

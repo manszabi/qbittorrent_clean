@@ -7,6 +7,6 @@ A korábbi lista elkészült:
 
 Részletek: README.md („A saját környezet") és tests/FELULVIZSGALAT.md 5. fejezet.
 
-Ami szándékosan maradt eltérés: a --probak, a --szalak és a --max-torles csak
-parancssorból állítható. A felületen minden sor külön kipipálható, és a törlés
-előtt látszik, mi fog történni – szólj, ha mégis kell.
+A --probak, a --szalak és a --max-torles is bekerült a felületre
+(Újrapróbálkozás, Párhuzamos lekérdezés, Biztonsági határ), így a két felület
+kapcsolókészlete gyakorlatilag egyezik.
