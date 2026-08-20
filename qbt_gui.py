@@ -90,6 +90,16 @@ def beallitas_fajl() -> Path:
     return Path.home() / ".qbittorrent_clean.json"
 
 
+def kijelolt_sorok(lista: tk.Listbox) -> list[int]:
+    """Egy Listbox kijelölt sorainak indexei, csökkenő sorrendben – így a
+    törlés nem csúsztatja el a még hátralévő indexeket.
+
+    A tkinter típusleírásában a `curselection()` visszatérési értéke
+    ismeretlen; itt egyszer, központi helyen rögzítjük, hogy egész számok."""
+    kijelolt = lista.curselection()  # type: ignore[no-untyped-call]
+    return sorted((int(x) for x in kijelolt), reverse=True)
+
+
 def _szoveglista(adat: Any) -> list[str]:
     """A beállítás-fájlból jövő listák megszűrése. Kézzel is átírható fájl,
     ezért nem bízunk a szerkezetében: egy sima szövegen például végig lehetne
@@ -151,7 +161,7 @@ class TakaritoApp:
     fut, hogy az ablak ne fagyjon le; az eredmény egy sorba (queue) kerül, amit
     az ablak 100 ezredmásodpercenként néz meg."""
 
-    def __init__(self, root: tk.Misc) -> None:
+    def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.uzenetek: queue.Queue[tuple[Any, ...]] = queue.Queue()
         self.elemek: list[engine.Candidate] = []   # engine.Candidate lista
@@ -459,7 +469,7 @@ class TakaritoApp:
             initialvalue="\\\\192.168.1.38\\downloads", parent=self.root))
 
     def konyvtar_kivesz(self) -> None:
-        for i in reversed(self.lista_kony.curselection()):
+        for i in kijelolt_sorok(self.lista_kony):
             self.lista_kony.delete(i)
 
     def kuka_tallozas(self) -> None:
@@ -499,7 +509,7 @@ class TakaritoApp:
         self.lista_ut.insert("end", f"{tavoli.strip()}={helyi.strip()}")
 
     def utvonal_kivesz(self) -> None:
-        for i in reversed(self.lista_ut.curselection()):
+        for i in kijelolt_sorok(self.lista_ut):
             self.lista_ut.delete(i)
 
     # -------------------------------------------------------- beállítás-fájl
@@ -1008,14 +1018,18 @@ class TakaritoApp:
         """Egy háttérszáltól érkezett üzenet feldolgozása. A válasz első eleme
         mondja meg, miről van szó; a többi az adott üzenet tartalma."""
         fajta, *tartalom = uzenet
-        kezelo = {
+        # A kezelok mas-mas parametereket varnak (az uzenet fajtaja mondja
+        # meg, mit): a kozos tipusuk igy csak "valamit csinal, nem ad vissza
+        # semmit". A tartalom a kuldes helyen es itt is egyutt valtozik.
+        kezelok: dict[str, Callable[..., None]] = {
             "allapot": self._uzenet_allapot,
             "kapcsolat": self._uzenet_kapcsolat,
             "vizsgalat": self._uzenet_vizsgalat,
             "torles": self._uzenet_torles,
             "megszakadt": self._uzenet_megszakadt,
             "hiba": self._uzenet_hiba,
-        }.get(fajta)
+        }
+        kezelo = kezelok.get(fajta)
         if kezelo:
             kezelo(*tartalom)
 

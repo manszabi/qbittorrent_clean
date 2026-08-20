@@ -247,7 +247,11 @@ class QbtClient:
         req.add_header("Origin", self.base)
         req.add_header("User-Agent", f"qbt_cleanup.py/{__version__}")
         with self.opener.open(req, timeout=self.timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
+            nyers: bytes = resp.read()
+        # A valasz kodolasat nem hisszuk el a kiszolgalonak: a qBittorrent
+        # API-ja UTF-8-at ad, a hibas bajtokat pedig inkabb helyettesitjuk,
+        # mint hogy egy ekezet miatt elszalljon a takaritas.
+        return nyers.decode("utf-8", "replace")
 
     @staticmethod
     def _varakozas(exc: urllib.error.HTTPError, proba: int) -> float:
@@ -264,7 +268,7 @@ class QbtClient:
                 return max(0.0, min(float(fejlec), MAX_RETRY_AFTER))
             except ValueError:
                 pass  # a datum alaku Retry-After-t nem ertelmezzuk
-        return PROBA_SZUNET * (2 ** proba)
+        return PROBA_SZUNET * (2.0 ** proba)
 
     def _var(self, mennyit: float) -> None:
         """Varakozas ket probalkozas kozott, a megszakitasra figyelve.
@@ -1526,7 +1530,7 @@ def _elokeszites(args: argparse.Namespace) -> _Futas:
 def _jelszo(args: argparse.Namespace) -> str | None:
     """A jelszo a parancssorbol, a kornyezetbol, vagy bekerve. Ha kellene, de
     nincs honnan venni: QbtError."""
-    password = args.password
+    password: str | None = args.password
     if password is None:
         password = os.environ.get("QBT_PASSWORD")
     if args.user and password is None:

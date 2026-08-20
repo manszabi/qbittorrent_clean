@@ -304,7 +304,7 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | `qbt_naplo.py` | A törlési napló: sorok írása, heti / méret szerinti rotálás, tömörítés. |
 | `qbt_takaritas.bat` | Parancssoros indító ütemezett futtatáshoz. |
 | `requirements.txt` | Külső csomag nincs – az indító ezt ellenőrzi. |
-| `pyproject.toml` | A fejlesztői eszközök (ruff) beállítása; a program telepítés nélkül fut. |
+| `pyproject.toml` | A fejlesztői eszközök (`ruff`, `mypy`) beállítása; a program telepítés nélkül fut. |
 | `tests/` | Tesztkészlet (lásd lent) és a felülvizsgálati jegyzőkönyv. |
 
 ## Teszt
@@ -313,7 +313,15 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 tests/run_all.sh          # az egész készlet
 python3 tests/qbt_test.py # csak a motor (tkinter nélkül is megy)
 ruff check .              # stílus- és hibaellenőrzés
+mypy                      # típusellenőrzés (a beállítása a pyproject.toml-ban)
 ```
+
+A `mypy` a program moduljait `strict` módban nézi. Az `indit.py` kivétel:
+az szándékosan régi nyelvtannal, típus-annotációk nélkül készült, hogy egy
+túl régi Python is le tudja fordítani, és érthető üzenetet adjon a verzióról.
+A tesztek nincsenek benne: azok szándékosan cserélgetik a program belsejét
+(hamis párbeszédablak, lassított függvény, Windows-szimuláció), ott a
+típusellenőrzés csak zajt adna.
 
 Ugyanez fut a GitHubon is minden feltöltésnél
 (`.github/workflows/tesztek.yml`), a 3.10-től a 3.14-ig minden Python

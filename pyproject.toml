@@ -1,5 +1,5 @@
 # A program telepites nelkul is fut (nincs kulso fuggosege), ez a fajl a
-# fejlesztoi eszkozok - elsosorban a ruff - kozos beallitasa.
+# fejlesztoi eszkozok - a ruff es a mypy - kozos beallitasa.
 
 [project]
 name = "qbittorrent-clean"
@@ -45,3 +45,31 @@ ignore = [
 # csak a fajl elejen all, a modulszintu allapot szandekos, a nyers szamok
 # pedig eppen a vart ertekek.
 "tests/*" = ["E402", "RUF005", "PLR2004", "PLW0603", "PLR0915", "PLC0415"]
+
+# --- mypy: tipusellenorzes ---------------------------------------------------
+# A ruff a nyelvtant es a stilust nezi, a mypy a tipusokat: azt fogja meg, amit
+# a teszt csak akkor venne eszre, ha eppen arra az agra fut ra (elgepelt mezo,
+# None-nal nem szamolo hivas, rossz visszateresi ertek).
+[tool.mypy]
+python_version = "3.10"
+files = ["qbt_cleanup.py", "qbt_gui.py", "qbt_naplo.py", "qbt_kornyezet.py",
+         "indit.py"]
+strict = true
+# Az uzenet mutassa meg a kodot is: igy latszik, mit kellene javitani, es
+# melyik ellenorzest kapcsolna ki egy esetleges "type: ignore".
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+# Az indito szandekosan regi nyelvtannal, tipus-annotaciok nelkul keszult:
+# egy tul regi Pythonnak is le kell tudnia forditani, hogy ertheto uzenetet
+# adhasson a verziorol. A tobbi ellenorzes (elgepelt nev, rossz hivas) ra is
+# vonatkozik.
+module = "indit"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+
+# A tesztek szandekosan cserelgetik a program belsejet (hamis parbeszedablak,
+# lassitott fuggveny, Windows-szimulacio) - ott a tipusellenorzes csak zajt
+# adna, ezert a fenti "files" nem tartalmazza oket.
