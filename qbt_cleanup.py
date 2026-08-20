@@ -1764,4 +1764,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A program a sajat kornyezetebol (.venv) fut: ha meg nem abbol indultunk,
+    # ez ujrainditja ugyanezt a fajlt, valtozatlan kapcsolokkal. A modul
+    # importalasakor semmi nem tortenik: a felulet es a tesztek ugyanugy
+    # hasznaljak a motort, mint eddig.
+    import qbt_kornyezet
+
+    _kod = qbt_kornyezet.belepes(__file__)
+    sys.exit(main() if _kod is None else _kod)

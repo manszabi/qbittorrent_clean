@@ -1032,4 +1032,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A program a saját környezetéből (.venv) fut: ha még nem abból indultunk,
+    # ez újraindítja ugyanezt a fájlt. Csak közvetlen indításkor: importáláskor
+    # (tesztek) nem történik semmi.
+    import qbt_kornyezet
+
+    _kod = qbt_kornyezet.belepes(__file__)
+    sys.exit(main() if _kod is None else _kod)

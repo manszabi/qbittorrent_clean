@@ -9,6 +9,8 @@ fájlokat és könyvtárakat, **amikhez már nem tartozik torrent**, és törli 
 
 - **grafikus felület** és parancssoros használat is,
 - csak `python3` kell hozzá (3.10+), **külső csomag nélkül**,
+- a saját **`.venv`** környezetében fut (Windowson és Linuxon egyaránt), amit
+  az első indításkor magának készít el,
 - **alapból semmit nem töröl**, csak kiírja, mit törölne,
 - a tényleges törléshez `--torol` kell, és megerősítést kér (`--igen` kihagyja),
 - törlés helyett tud **kukába** is mozgatni (`--kuka`),
@@ -22,15 +24,42 @@ elintéz:
 
 - megkeresi a Pythont (`py` launcher, majd `python`),
 - ellenőrzi a verziót (3.10 vagy újabb kell),
+- **elkészíti a saját `.venv` környezetet** a program mappájában (egyszeri,
+  pár másodperc), és onnantól mindig abban fut,
 - ellenőrzi a szükséges modulokat (`tkinter` és a szabvány könyvtár),
-- ha a `requirements.txt`-ben van külső csomag, **telepíti** (ha a rendszerszintű
-  telepítés nem megy, `--user` módban újrapróbálja),
+- ha a `requirements.txt`-ben van külső csomag, **telepíti** – a saját
+  környezetbe, tehát a rendszer Pythonjához nem nyúl,
 - majd elindítja a grafikus felületet.
 
 Maga a `.bat` szándékosan csak a Pythont keresi meg, minden ellenőrzés az
 `indit.py`-ban van – így tesztelhető. (A `cmd.exe` nem az: többsoros zárójeles
 blokk és LF sorvég együtt menet közbeni, félrevezető hibákat okoz, ezért a
 parancsfájlban egyik sincs.)
+
+### A saját környezet (`.venv`)
+
+A program a saját mappájában készít egy `.venv` könyvtárat, és **mindig abban
+fut** – mindegy, hogy Windowson a `.bat`-ról, vagy Linuxon a
+`python3 qbt_gui.py` paranccsal indítod. A belépési pontok (`indit.py`,
+`qbt_gui.py`, `qbt_cleanup.py`) első dolga megnézni, hogy a `.venv`
+értelmezőjével futnak-e; ha nem, ugyanazt a fájlt újraindítják onnan,
+változatlan kapcsolókkal. A kimenet és a kilépési kód a hívóé marad, tehát az
+ütemezett futtatás számára sem változik semmi.
+
+Miért jó ez: a takarító mindenhol ugyanazzal a Pythonnal és ugyanazokkal a
+csomagokkal fut, és nem tud elromlani attól, hogy valaki a rendszer Pythonjában
+telepít vagy töröl valamit. Cserébe egy mappával több van (`.venv`, kb. 30 MB), az első indítás pedig
+pár másodperccel hosszabb; a későbbi indítások költsége mérve 0,1 mp.
+
+Ha nem hozható létre (nincs írási jog a mappára, vagy a disztribúció külön
+csomagba tette a `venv`-et: `sudo apt install python3-venv`), a program **nem
+áll le**: figyelmeztet, és a rendszer Pythonjával megy tovább.
+
+Kikapcsolás – fejlesztéshez, CI-hez, vagy ha magad kezeled a környezetet:
+
+```bash
+QBT_VENV_KIHAGY=1 python3 qbt_gui.py
+```
 
 ## A grafikus felület
 
@@ -263,7 +292,8 @@ Visszatérési érték: `0` = rendben, `1` = hiba (vagy nem sikerült minden tö
 | Fájl | Mi ez |
 |------|-------|
 | `qbittorrent_clean.bat` | **Windows-indító**: megkeresi a Pythont, és átadja a vezérlést az `indit.py`-nak. Ezt kattintsd. |
-| `indit.py` | A függőség-ellenőrzés: verzió, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
+| `indit.py` | A függőség-ellenőrzés: verzió, saját környezet, modulok, `tkinter`, csomagok telepítése – majd indítja a felületet. |
+| `qbt_kornyezet.py` | A saját `.venv` környezet: létrehozás, és a belépési pontok átváltása rá. |
 | `qbt_gui.py` | A grafikus felület (Tkinter). |
 | `qbt_cleanup.py` | A motor: ez végzi a tényleges munkát, és önmagában, parancssorból is használható (a `qbt_naplo.py` legyen mellette). |
 | `qbt_naplo.py` | A törlési napló: sorok írása, heti / méret szerinti rotálás, tömörítés. |
@@ -295,7 +325,8 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 | Teszt | Mit vizsgál |
 |-------|-------------|
 | `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, minden `%VÁLTOZÓ%` létezik, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
-| `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás `--user` módban, hiányos mappa. |
+| `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás (`--user`, illetve `ensurepip` a saját környezetben), hiányos mappa, átváltás a `.venv`-re. |
+| `kornyezet_test.py` | A saját `.venv`: útvonalak mindkét rendszerre, mikor kell átváltani, valódi környezet létrehozása és az, hogy a gyerekfolyamat tényleg abból indul. |
 | `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
 | `windows_test.py` | Windows 11 specifikus szabályok Linuxon szimulálva: hosszú útvonalak (`\\?\`, UNC), meghajtó-gyökér, kis-nagybetű, kuka-nevek, `%APPDATA%`, DPI-tudatosság, cp852 konzolkódlap, a napló mappájának megnyitása. Ahol lehet, a CPython saját `ntpath` modulja a mérce. |

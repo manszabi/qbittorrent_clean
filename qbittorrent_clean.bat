@@ -9,6 +9,10 @@ rem  Ez a fajl szandekosan nagyon egyszeru: megkeresi a Pythont, es atadja a
 rem  vezerlest az indit.py-nak. Minden fuggoseg-ellenorzes ott van, mert azt
 rem  lehet tesztelni - a cmd.exe-t nem.
 rem
+rem  Az elso inditaskor a program keszit maganak egy sajat Python
+rem  kornyezetet a .venv mappaban, es onnantol mindig abban fut. Ezt is az
+rem  indit.py vegzi - itt nincs vele teendo.
+rem
 rem  Ezert nincs benne tobbsoros zarojeles blokk sem: ha a fajl valahogy megis
 rem  LF sorveggel keruline a gepre, a cmd akkor sem tud rajta elcsuszni.
 rem
@@ -22,7 +26,7 @@ rem ---------------------------------------------------------------------------
 cd /d "%~dp0"
 
 echo ============================================================
-echo   qBittorrent takarito   [indito v3]
+echo   qBittorrent takarito   [indito v4]
 echo ============================================================
 echo.
 
