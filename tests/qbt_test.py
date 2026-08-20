@@ -418,6 +418,28 @@ check("fa+pontos mod: a felkesz fajlt is megtartja",
 felkesz.unlink()
 felkesz_gyoker.unlink()
 
+# --- a program sajat mappaja: sosem felesleges elem
+#
+# Van, aki a takaritot magaba a letoltesi konyvtarba teszi ki. A mappaja
+# egyetlen torrenthez sem tartozik, tehat "feleslegesnek" latszana - pedig
+# eppen az a program (a beallitasaival, a naplojaval, a .venv-jevel).
+
+sajat = share / "qbittorrent_clean"
+sajat.mkdir()
+(sajat / "qbt_cleanup.py").write_bytes(b"")
+regi_program = q.PROGRAM_KONYVTAR
+q.PROGRAM_KONYVTAR = sajat
+sajat_terv = q._Terv.keszit(q.Beallitas(), [rss], q.Figyelo())
+sajat_jeloltek = q.plan_toplevel(share, names, sajat_terv)
+check("a program sajat mappajat nem ajanlja torlesre",
+      [c for c in sajat_jeloltek if c.path.name == "qbittorrent_clean"], [])
+q.PROGRAM_KONYVTAR = regi_program
+sajat_terv = q._Terv.keszit(q.Beallitas(), [rss], q.Figyelo())
+check("mashonnan futtatva viszont felesleges elem",
+      [c.path.name for c in q.plan_toplevel(share, names, sajat_terv)
+       if c.path.name == "qbittorrent_clean"], ["qbittorrent_clean"])
+shutil.rmtree(sajat)
+
 # --- min-kor: a frissen modositott elemet meghagyja
 cands = q.plan_toplevel(share, names, T(protected=[rss], min_age_days=1))
 check("min-kor 1 nap: a friss elemeket meghagyja", names_of(cands, share), [])

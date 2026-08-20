@@ -106,9 +106,35 @@ def sajat_kornyezetben(gyoker: Path | None = None) -> bool:
     return _azonos(Path(sys.prefix), venv_konyvtar(gyoker))
 
 
+def _alap_python_megvan(hova: Path) -> bool:
+    """Megvan-e meg az a Python, amibol a kornyezet keszult.
+
+    Linuxon a .venv/bin/python egy symlink az alap Pythonra: ha azt
+    frissitettek vagy eltavolitottak, a link elszakad, es azt az is_file() maga
+    megmondja. Windowson viszont a python.exe egy masolat, ami a pyvenv.cfg
+    "home" sorabol talalja meg a Python konyvtarat - ha az mar nincs meg, a
+    hiba csak inditaskor, ertelmetlen uzenettel derulne ki (ez a klasszikus
+    "frissitettem a Pythont, es azota nem indul" eset). Ezert inkabb
+    beleolvasunk a fajlba: ez nem folyamatinditas, csak egy par soros fajl.
+
+    Bizonytalan esetben (nincs fajl, nincs "home" sor) igent mondunk: a
+    kornyezet eldobasa dragabb tevedes lenne, mint egy felesleges proba."""
+    try:
+        sorok = (hova / "pyvenv.cfg").read_text(encoding="utf-8",
+                                                errors="replace").splitlines()
+    except OSError:
+        return True
+    for sor in sorok:
+        kulcs, egyenlo, ertek = sor.partition("=")
+        if egyenlo and kulcs.strip().lower() == "home":
+            return Path(ertek.strip()).is_dir()
+    return True
+
+
 def van_sajat_kornyezet(gyoker: Path | None = None) -> bool:
-    """Letezik-e (es hasznalhato-e) a kesz kornyezet."""
-    return venv_python(gyoker).is_file()
+    """Letezik-e (es ep-e) a kesz kornyezet."""
+    return (venv_python(gyoker).is_file()
+            and _alap_python_megvan(venv_konyvtar(gyoker)))
 
 
 def _futtat(parancs: Sequence[str]) -> bool:
@@ -129,11 +155,14 @@ def letrehozas(gyoker: Path | None = None,
     csomagba teszik a pip-et), pip nelkul is megprobaljuk: a takaritonak nincs
     kulso fuggosege, annak egy pip nelkuli kornyezet is tokeletes."""
     utvonal = venv_python(gyoker)
-    if utvonal.is_file():
+    hova = venv_konyvtar(gyoker)
+    if utvonal.is_file() and _alap_python_megvan(hova):
         return utvonal
     if not sys.executable:  # beagyazott Python: nincs mivel letrehozni
         return None
-    hova = venv_konyvtar(gyoker)
+    # Ha van mar mappa, de nem hasznalhato (frissitett vagy eltavolitott
+    # Python), ugyanez a parancs helyre is teszi: ujrairja a beallitasait es
+    # az inditoit.
     kiir(f"[..]   Virtualis kornyezet keszitese (egyszeri): {hova}")
     parancsok = [[sys.executable, "-m", "venv", str(hova)],
                  [sys.executable, "-m", "venv", "--without-pip", str(hova)]]

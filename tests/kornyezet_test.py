@@ -164,6 +164,31 @@ else:
                           ["-c", "import sys; sys.exit(7)"], tmp)
     check("kikapcsolva nem indit semmit", kod, None)
 
+    # "Frissitettem a Pythont, es azota nem indul": a kornyezet a pyvenv.cfg
+    # "home" sorabol talalja meg az alap Pythont. Ha az mar nincs meg, a
+    # kornyezetet ujra kell epiteni - kulonben csak inditaskor, ertelmetlen
+    # hibaval derulne ki.
+    cfg = tmp / ".venv" / "pyvenv.cfg"
+    eredeti_cfg = cfg.read_text(encoding="utf-8")
+    cfg.write_text(eredeti_cfg.replace("home = ", "home = /nincs-ilyen-hely"),
+                   encoding="utf-8")
+    check("eltunt alap Python: a kornyezet nem hasznalhato",
+          kornyezet.van_sajat_kornyezet(tmp), False)
+    with Kornyezet(**TISZTA):
+        javitott, uzenet3 = csendben(kornyezet.letrehozas, tmp)
+    check("es a program magatol helyrehozza", javitott, ertelmezo)
+    check("szolva rola", "Virtualis kornyezet keszitese" in uzenet3, True)
+    check("utana ujra rendben van", kornyezet.van_sajat_kornyezet(tmp), True)
+
+    # Hianyzo vagy ertelmezhetetlen pyvenv.cfg: inkabb hisszuk jonak, mint
+    # hogy feleslegesen eldobjunk egy mukodo kornyezetet.
+    cfg.write_text("ez nem kulcs-ertek\n", encoding="utf-8")
+    check("ertelmezhetetlen pyvenv.cfg: nem dobjuk el a kornyezetet",
+          kornyezet.van_sajat_kornyezet(tmp), True)
+    cfg.unlink()
+    check("hianyzo pyvenv.cfg eseten sem", kornyezet.van_sajat_kornyezet(tmp),
+          True)
+
     # A belepes ugyanazt csinalja, csak a szkriptet es a kapcsolokat is atadja.
     forras = tmp / "proba.py"
     forras.write_text("import sys; print(' '.join(sys.argv[1:]))\n",

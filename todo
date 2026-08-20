@@ -1,3 +1,12 @@
-Egy ismert eltérés maradt szándékosan: a felületen nincs időkorlát/önaláírt-TLS beállítás, csak a parancssorban — szólj, ha ezt is kéred.
-mypy-t is tedd bele a CI-be
-a web_downloader létrehoz egy Virtualis kornyezet-et, .venv könyvtárba, tegye ez a kód is ezt-
+A korábbi lista elkészült:
+
+* a felületen is van hálózati időkorlát és önaláírt-TLS beállítás,
+* a mypy bekerült a CI-be (strict; a beállítása a pyproject.toml-ban),
+* a program a saját .venv környezetét készíti el, és Linuxon és Windowson is
+  mindig abban fut (kikapcsolás: QBT_VENV_KIHAGY=1).
+
+Részletek: README.md („A saját környezet") és tests/FELULVIZSGALAT.md 5. fejezet.
+
+Ami szándékosan maradt eltérés: a --probak, a --szalak és a --max-torles csak
+parancssorból állítható. A felületen minden sor külön kipipálható, és a törlés
+előtt látszik, mi fog történni – szólj, ha mégis kell.

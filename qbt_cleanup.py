@@ -124,7 +124,7 @@ GYOKER_RESZEK: Final = 2
 # jelszo, nem letezo hivas - hiaba jonne ujra, ugyanaz lenne a valasz.
 UJRAPROBALHATO: Final = frozenset({408, 429, 500, 502, 503, 504})
 HTTP_TILTVA: Final = 403                # lejart munkamenet vagy rossz jelszo
-MAX_RETRY_AFTER: Final = 30             # a Retry-After fejlecet ennyire vagjuk
+MAX_RETRY_AFTER: Final = 30.0           # a Retry-After fejlecet ennyire vagjuk
 ALAP_PROBAK: Final = 3                  # ennyiszer probalunk egy hivast
 PROBA_SZUNET: Final = 1.0               # az elso ujraprobalkozas elotti szunet
 ALAP_SZALAK: Final = 8                  # a fajllista-lekeres parhuzamossaga
@@ -136,6 +136,12 @@ JELZES_ELEMENKENT: Final = 200
 
 # Egy nap masodpercben (a --min-kor szamolasahoz).
 NAP_MP: Final = 86400
+
+# A program sajat mappaja. Ezt sosem toroljuk: van, aki a takaritot magaba a
+# letoltesi konyvtarba teszi ki, es ott a program mappaja - a beallitasaival,
+# a naplojaval es a sajat .venv kornyezetevel egyutt - egyetlen torrenthez sem
+# tartozik, tehat "feleslegesnek" latszana. Nem az: eppen ez a program.
+PROGRAM_KONYVTAR: Final = Path(__file__).resolve().parent
 
 # Egy meretegyseg (KB, MB, ...) valtoszama, es a felsorolasokbol ennyi tetelt
 # mutatunk meg - a tobbi csak darabszamkent jelenik meg.
@@ -1017,7 +1023,9 @@ class _Terv:
         return cls(
             beallitas=beallitas,
             kivetelek=Kivetelek(beallitas.excludes, kis_nagy),
-            vedett=frozenset(path_key(x, kis_nagy) for x in vedett),
+            # A program sajat mappaja mindig vedett - lasd PROGRAM_KONYVTAR.
+            vedett=frozenset(path_key(x, kis_nagy)
+                             for x in (*vedett, PROGRAM_KONYVTAR)),
             figyelo=figyelo,
         )
 

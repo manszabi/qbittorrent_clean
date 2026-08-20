@@ -269,6 +269,10 @@ kapcsolja ki (a törlési naplóval együtt).
   **nem töröl semmit**.
 - A gyökérkönyvtárat (`/`, `C:\`) nem hajlandó takarítani; a megosztás gyökere
   (`\\gép\megosztás`) viszont rendben van.
+- A **saját mappáját** sosem törli. Ha valaki a takarítót magába a letöltési
+  könyvtárba teszi ki, a mappája egyetlen torrenthez sem tartozik, tehát
+  „feleslegesnek" látszana – pedig éppen az a program, a beállításaival, a
+  naplójával és a `.venv` környezetével együtt.
 - A **260 karakternél hosszabb** útvonalakat is kezeli Windowson (a hosszú
   kiadási nevek egy `Subs` almappával könnyen átlépik ezt a határt).
 - Ha egy **alkönyvtárat nem tud beolvasni** (jogosultság, hálózati akadás),

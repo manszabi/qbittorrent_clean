@@ -174,7 +174,15 @@ def kornyezet_valtas():
     return qbt_kornyezet.belepes(os.path.join(ITT, "indit.py"), kiir=print)
 
 
-def main(indit=True, valtas=True):
+def main(indit=True, valtas=None):
+    """A teljes inditas. Az `indit` hamisra allitva csak ellenoriz (ezt
+    hasznalja a teszt), a `valtas` pedig a sajat kornyezetre valtast kapcsolja.
+
+    A `valtas` alapertelmezese szandekosan az `indit`: a kornyezetre valtas
+    ugyanezt a fajlt inditja el ujra, tehat ha a hivo eppen NEM akart
+    programot inditani, akkor a gyerekfolyamat sem indithat feluletet."""
+    if valtas is None:
+        valtas = indit
     keret("qBittorrent takarito")
 
     # A verziot a kornyezet-valtas ELOTT nezzuk meg: a sajat kornyezetet is
