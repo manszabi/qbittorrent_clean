@@ -609,13 +609,23 @@ class TakaritoApp:
     # ------------------------------------------------------------ vizsgálat
 
     def _konyvtarak_ellenorzese(self) -> tuple[bool, list[Path]]:
-        """A vizsgálandó könyvtárak listája, ellenőrizve."""
+        """A vizsgálandó könyvtárak listája, ellenőrizve.
+
+        Ugyanaz a könyvtár kétszer felsorolva megvédené önmagát (a felsoroltak
+        védik egymást), és a vizsgálat üres eredményt adna. A listára ilyen
+        nem kerülhet fel, egy kézzel átírt beállítás-fájlból viszont igen –
+        ezért itt is kiszűrjük, ugyanúgy, ahogy a parancssoros változat."""
         konyvtarak: list[Path] = []
+        latott: set[str] = set()
         for szoveg in self.lista_kony.get(0, "end"):
             ut = engine.normalize_target(szoveg)
             if not ut.is_dir():
                 messagebox.showerror(CIM, f"Nem érhető el a könyvtár:\n{ut}")
                 return False, []
+            kulcs = engine.path_key(ut)
+            if kulcs in latott:
+                continue
+            latott.add(kulcs)
             konyvtarak.append(ut)
         if not konyvtarak:
             messagebox.showerror(CIM, "Adj meg legalább egy vizsgálandó "

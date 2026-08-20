@@ -134,6 +134,9 @@ MAX_SZALAK: Final = 16
 # es adunk visszajelzest a hivonak. Fajlonkent hivni feleslegesen draga lenne.
 JELZES_ELEMENKENT: Final = 200
 
+# Egy nap masodpercben (a --min-kor szamolasahoz).
+NAP_MP: Final = 86400
+
 # Egy meretegyseg (KB, MB, ...) valtoszama, es a felsorolasokbol ennyi tetelt
 # mutatunk meg - a tobbi csak darabszamkent jelenik meg.
 EGYSEG: Final = 1024
@@ -319,7 +322,7 @@ class QbtClient:
             if proba:
                 self._var(self._varakozas(utolso, proba - 1)
                           if isinstance(utolso, urllib.error.HTTPError)
-                          else PROBA_SZUNET * (2 ** (proba - 1)))
+                          else PROBA_SZUNET * (2.0 ** (proba - 1)))
             try:
                 return self._keres(path, params, post)
             except urllib.error.HTTPError as exc:
@@ -478,6 +481,21 @@ def path_key(value: str | os.PathLike[str], ignore_case: bool = True) -> str:
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
     return norm_key(text, ignore_case)
+
+
+def gyerek_kulcs(szulo_kulcs: str, nev_kulcs: str) -> str:
+    """Egy bejegyzes osszehasonlitasi kulcsa a szulojeebol es a neve kulcsabol.
+
+    Ugyanazt adja, mint a path_key(szulo / nev), csak a teljes utvonal
+    ujraepitese nelkul (Path-objektum, majd szoveg, majd az egesz ut ujra-
+    egysegesitese). Fajlonkent hivjuk: merve 5,4 mikromasodperc helyett 0,4 -
+    szazezer bejegyzesnel ez fel masodperc.
+
+    A perjelcsere azert kell, mert a path_key is elvegzi: Linuxon a fajlnevben
+    lehet visszafele dolo perjel, es ha azt itt maskepp kezelnenk, mint a
+    torrentek oldalan, akkor egy torrenthez tartozo fajl kulcsa nem egyezne -
+    es a program feleslegesnek latna."""
+    return szulo_kulcs.rstrip("/") + "/" + nev_kulcs.replace("\\", "/")
 
 
 def under(key: str, parent_key: str) -> bool:
@@ -846,6 +864,14 @@ def entry_size(path: str | os.PathLike[str], is_dir: bool) -> int:
     return total
 
 
+def _meret(path: Path, is_dir: bool, adat: os.stat_result | None) -> int:
+    """Egy talalat merete. Fajlnal a mar meglevo adatbol (nincs ujabb kerdes),
+    konyvtarnal a teljes fa bejarasabol."""
+    if is_dir:
+        return entry_size(path, True)
+    return adat.st_size if adat else 0
+
+
 class Kivetelek:
     """Elore feldolgozott kivetel-mintak.
 
@@ -877,15 +903,39 @@ def is_excluded(name: str, patterns: Iterable[str] = (),
     return Kivetelek(patterns, ignore_case).talal(norm_key(name, ignore_case))
 
 
-def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
+def bejegyzes_adatai(entry: os.DirEntry[str]) -> os.stat_result | None:
+    """Egy konyvtar-bejegyzes adatai (meret, modositasi ido) - egy kerdesbol.
+
+    A DirEntry a konyvtar beolvasasakor kapott adatokat orzi: Windowson ezek
+    mar megvannak, tehat egyaltalan nem kell ujra kerdezni a kiszolgalotol
+    (Samba megosztason fajlonkent egy elmaradt fordulo), maskepp pedig egyszer
+    kerdez, es a valaszt megjegyzi - igy a kor- es a meret-ellenorzes egyutt
+    is csak egy hivas.
+
+    Ha nem olvashato (idokozben eltunt, nincs jog), None: ilyenkor a hivo a
+    biztonsagos iranyba dont (nem fiatal, meret 0)."""
+    try:
+        return entry.stat(follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def fiatal(adat: os.stat_result | None, min_age_days: float) -> bool:
     """Frissen modositott elem: hagyjuk beken (pl. eppen most kerult oda)."""
+    if min_age_days <= 0 or adat is None:
+        return False
+    return (time.time() - adat.st_mtime) < min_age_days * NAP_MP
+
+
+def too_young(path: str | os.PathLike[str], min_age_days: float) -> bool:
+    """Ugyanaz, utvonalbol - ha nincs kesz konyvtar-bejegyzes."""
     if min_age_days <= 0:
         return False
     try:
-        mtime = os.stat(hosszu_ut(path), follow_symlinks=False).st_mtime
+        adat = os.stat(hosszu_ut(path), follow_symlinks=False)
     except OSError:
         return False
-    return (time.time() - mtime) < min_age_days * 86400
+    return fiatal(adat, min_age_days)
 
 
 def scandir_sorted(path: str | os.PathLike[str]) -> list[os.DirEntry[str]]:
@@ -982,21 +1032,27 @@ def plan_toplevel(target: str | os.PathLike[str], names: set[str],
     """Csak a legfelso szint, nevek alapjan."""
     out: list[Candidate] = []
     kis_nagy = terv.beallitas.ignore_case
+    # A konyvtar sajat adatait egyszer szamoljuk ki, nem bejegyzesenkent ujra.
+    gyoker = Path(target)
+    cel_kulcs = path_key(target, kis_nagy)
     for entry in scandir_sorted(target):
         terv.figyelo.ellenoriz()
-        full = Path(target) / entry.name
         nev_kulcs = norm_key(entry.name, kis_nagy)
-        if terv.bekenhagy(path_key(full, kis_nagy), nev_kulcs):
+        if terv.bekenhagy(gyerek_kulcs(cel_kulcs, nev_kulcs), nev_kulcs):
             continue
         if kesz_kulcs(nev_kulcs, kis_nagy) in names:
             continue  # a torrente (a felkesz .!qB valtozata is)
-        if too_young(full, terv.beallitas.min_age_days):
+        # Az utvonal-objektum csak innentol kell: amit fentebb kihagytunk
+        # (torrente vagy kivetel), ahhoz felesleges lett volna felepiteni.
+        full = gyoker / entry.name
+        adat = bejegyzes_adatai(entry)
+        if fiatal(adat, terv.beallitas.min_age_days):
             continue
         if entry.is_symlink():
             out.append(Candidate(full, False, 0, "nem tartozik torrenthez (link)"))
             continue
         is_dir = entry.is_dir(follow_symlinks=False)
-        out.append(Candidate(full, is_dir, entry_size(full, is_dir),
+        out.append(Candidate(full, is_dir, _meret(full, is_dir, adat),
                              "nem tartozik torrenthez"))
     return out
 
@@ -1018,10 +1074,13 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
     out: list[tuple[str, Candidate]] = []
     kis_nagy = terv.beallitas.ignore_case
     gyoker = Path(target)
-    varolista = [gyoker]
+    # A varolistan az utvonal mellett az osszehasonlitasi kulcsa is utazik:
+    # igy a bejegyzesek kulcsa a szuloebol allithato elo, nem kell minden
+    # fajlnal az egesz utat ujraepiteni es egysegesiteni.
+    varolista = [(gyoker, path_key(gyoker, kis_nagy))]
     atnezett = 0
     while varolista:
-        path = varolista.pop()
+        path, szulo_kulcs = varolista.pop()
         try:
             bejegyzesek = scandir_sorted(path)
         except QbtError as exc:
@@ -1036,12 +1095,13 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
                 terv.figyelo.jelez(
                     f"{target}: {atnezett} elem atnezve, "
                     f"{len(out)} felesleges...")
-            full = path / entry.name
-            key = path_key(full, kis_nagy)
-            if terv.bekenhagy(key, norm_key(entry.name, kis_nagy)):
+            nev_kulcs = norm_key(entry.name, kis_nagy)
+            key = gyerek_kulcs(szulo_kulcs, nev_kulcs)
+            if terv.bekenhagy(key, nev_kulcs):
                 continue
             if kesz_kulcs(key, kis_nagy) in roots:
                 continue  # a torrente: se o, se ami alatta van
+            full = path / entry.name
             if entry.is_symlink():
                 if key not in dirs:
                     out.append((key, Candidate(
@@ -1049,11 +1109,13 @@ def plan_tree(target: str | os.PathLike[str], roots: set[str], dirs: set[str],
                 continue
             is_dir = entry.is_dir(follow_symlinks=False)
             if is_dir and key in dirs:
-                varolista.append(full)  # van alatta megtartando elem
+                # van alatta megtartando elem: bele kell nezni
+                varolista.append((full, key))
                 continue
-            if too_young(full, terv.beallitas.min_age_days):
+            adat = bejegyzes_adatai(entry)
+            if fiatal(adat, terv.beallitas.min_age_days):
                 continue
-            out.append((key, Candidate(full, is_dir, entry_size(full, is_dir),
+            out.append((key, Candidate(full, is_dir, _meret(full, is_dir, adat),
                                        "nem tartozik torrenthez")))
     out.sort(key=lambda parost: parost[0])
     return [jelolt for _, jelolt in out]

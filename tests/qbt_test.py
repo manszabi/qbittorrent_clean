@@ -148,6 +148,26 @@ win_torrent = [{"hash": "w", "name": "Film", "save_path": "D:\\letoltes",
 win_roots, _ = q.owned_paths(win_torrent, {}, [], "D:\\letoltes")
 check("owned_paths: Windows-utvonal megfeleltetes nelkul is egyezik",
       sorted(win_roots), ["d:/letoltes/film"])
+# A takaritas minden bejegyzes kulcsat a szuloje kulcsabol allitja elo (ez a
+# gyors ut). Ha ez barmiben elternene a teljes utvonal kulcsatol, egy
+# torrenthez tartozo fajlt feleslegesnek latna a program - ezert a ketto
+# egyezeset kulon ellenorizzuk, a nehez neveken is.
+szulok = ["/mnt/downloads", "/mnt/downloads/", "//gep/megosztas", "/",
+          "C:/letoltes", "\\\\gep\\megosztas\\rss", "/mnt/ekezetes konyvtar"]
+kulonos_nevek = ["film.mkv", "Ekezetes Nev.mkv", "a\\b", "NAGY.BETU.MKV",
+                 unicodedata.normalize("NFD", "arvizturo.mkv"),
+                 "pont.a.vegen.", "szokoz a vegen ", "tab\tos", "emoji-x.mkv",
+                 "Strasse.mkv"]
+elteres = [
+    (szulo, nev)
+    for kis_nagy in (True, False)
+    for szulo in szulok
+    for nev in kulonos_nevek
+    if q.gyerek_kulcs(q.path_key(szulo, kis_nagy), q.norm_key(nev, kis_nagy))
+    != q.path_key(Path(szulo) / nev, kis_nagy)
+]
+check("gyerek_kulcs: ugyanaz, mint a teljes utvonal kulcsa", elteres, [])
+
 check("kesz_kulcs: a .!qB vegzodest levagja",
       q.kesz_kulcs(q.norm_key("Film.mkv" + q.INCOMPLETE_SUFFIX)), "film.mkv")
 check("kesz_kulcs: mast nem bant", q.kesz_kulcs(q.norm_key("Film.mkv")), "film.mkv")

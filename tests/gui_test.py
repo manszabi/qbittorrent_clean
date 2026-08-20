@@ -168,6 +168,14 @@ check_true("jo jelszoval kapcsolodik",
 check_true("kiirja a torrentek szamat", "3 torrent" in app.v_allapot.get(),
            app.v_allapot.get())
 
+# Kezzel atirt beallitas-fajlbol ugyanaz a konyvtar ketszer is bekerulhet:
+# olyankor megvedene onmagat, es a vizsgalat ures lenne.
+app.lista_kony.insert("end", str(share))
+rendben, konyvtarak = app._konyvtarak_ellenorzese()
+check("ugyanaz a konyvtar ketszer: csak egyszer szamit",
+      (rendben, konyvtarak), (True, [share, rss]))
+app.lista_kony.delete(app.lista_kony.size() - 1)
+
 # --- halozati beallitasok (idokorlat, onalairt tanusitvany) ------------------
 
 check("az idokorlat alapbol a motor gyari erteke", app.v_idokorlat.get(),
