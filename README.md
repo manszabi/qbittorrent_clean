@@ -344,7 +344,7 @@ megmaradnak, az `rss` alkönyvtár védve van, hiba esetén pedig semmi nem vés
 | `bat_test.py` | A Windows parancsfájlok: CRLF sorvég, ékezetmentesség, nincs többsoros zárójeles blokk, minden `goto`-nak van címkéje, minden `%VÁLTOZÓ%` létezik, a hivatkozott fájlok léteznek. (Ezek nélkül a `cmd.exe` menet közben, félrevezető helyen száll el.) |
 | `indit_test.py` | Az indító függőség-ellenőrzései: verzió, hiányzó modul, `requirements.txt` értelmezése, `pip` újrapróbálkozás (`--user`, illetve `ensurepip` a saját környezetben), hiányos mappa, átváltás a `.venv`-re. |
 | `kornyezet_test.py` | A saját `.venv`: útvonalak mindkét rendszerre, mikor kell átváltani, valódi környezet létrehozása és az, hogy a gyerekfolyamat tényleg abból indul. |
-| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás. |
+| `qbt_test.py` | A motor: útvonal-kezelés (kétféle ékezet-kódolás, kétféle perjel), a két üzemmód, kuka, biztonsági fékek, valódi törlés, naplózás, és `https` önaláírt tanúsítvánnyal (alapból elutasítja, külön kérésre átengedi). |
 | `naplo_test.py` | A törlési napló: oszlopok, rotálás méretre és hétfőnként, tömörítés, régi fájlok eldobása, hibatűrés. |
 | `windows_test.py` | Windows 11 specifikus szabályok Linuxon szimulálva: hosszú útvonalak (`\\?\`, UNC), meghajtó-gyökér, kis-nagybetű, kuka-nevek, `%APPDATA%`, DPI-tudatosság, cp852 konzolkódlap, a napló mappájának megnyitása. Ahol lehet, a CPython saját `ntpath` modulja a mérce. |
 | `terheles_test.py` | Terhelés és mérés: 8000 bejegyzésű megosztás mindkét módban, memóriacsúcs, párhuzamos fájllista-lekérés, a lekérdezendő torrentek szűrése,

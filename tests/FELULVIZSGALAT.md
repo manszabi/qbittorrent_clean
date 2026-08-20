@@ -208,6 +208,7 @@ Amire figyeltünk:
 | Ha a `venv` modulban nincs `pip`? | Másodszorra `--without-pip` alakban is megpróbálja: a takarítónak nincs külső függősége, annak az is tökéletes. |
 | Csomagtelepítés | A saját környezetben a `--user` telepítés értelmetlen (a pip vissza is utasítja): ott a hiányzó `pip`-et az `ensurepip` pótolja, és csak a rendszer Pythonjánál marad a `--user`. |
 | „Frissítettem a Pythont, és azóta nem indul" | A `.venv` a `pyvenv.cfg` `home` sorából találja meg az alap Pythont. Ha az már nincs meg, a program ezt **indítás előtt** észreveszi (egy fájl beolvasása, nem folyamatindítás), és újraépíti a környezetet. |
+| Ha a mappa nem írható? | (Pl. `Program Files` alatt.) Ezt a program **előre** megnézi, és nem indít fölöslegesen alfolyamatot minden egyes induláskor: egyszer szól, és a rendszer Pythonjával megy tovább. |
 | Kikapcsolás | `QBT_VENV_KIHAGY=1` – ezt használja a tesztkészlet és a CI is. |
 | Ellenőrző mód | Az `indit.main(indit=False)` (csak ellenőrzés) **nem** vált környezetet: a váltás ugyanezt a fájlt indítaná újra, és ott már felület is nyílna. |
 
@@ -283,6 +284,11 @@ teszt ezt külön mérésként is őrzi.
   építeni. A `python -m venv` nem töröl, csak felülír, és a következő indítás
   magától helyrehozza – ezért maradt a helyben építés: így az `activate`
   parancsfájlokban a valódi útvonal szerepel.
+- **A `https` és az önaláírt tanúsítvány**: a teszt `openssl`-lel készíttet egy
+  tanúsítványt, elindít egy valódi TLS-kiszolgálót, és mindkét irányt
+  ellenőrzi: alapból **elutasítja** az önaláírt tanúsítványt (különben a
+  „biztonságos" kapcsolat semmit nem érne), külön kérésre viszont átengedi. Így
+  a repóban nincs privát kulcs, és nincs lejáró fixture sem.
 - **A `--probak`, `--szalak` és `--max-torles` továbbra sem érhető el a
   felületen.** Nem hiányosság: a felületen minden sor külön kipipálható, és a
   törlés előtt a program megmutatja, mit fog csinálni – a parancssoros
@@ -291,15 +297,15 @@ teszt ezt külön mérésként is őrzi.
 ### 5.7 Tesztek a harmadik kör után
 
 ```
-motor (qbt_test.py)                      158 / 158
+motor (qbt_test.py)                      160 / 160
 felület (gui_test.py, Xvfb)              104 / 104
 törlési és eseménynapló (naplo_test.py)   49 / 49
 indító (indit_test.py)                    39 / 39
+saját környezet (kornyezet_test.py)       34 / 34
 Windows 11 (windows_test.py)              33 / 33
-saját környezet (kornyezet_test.py)       32 / 32
 parancsfájlok (bat_test.py)               21 / 21
 terhelés és mérések (terheles_test.py)    16 / 16
-összesen                                 452 / 452
+összesen                                 456 / 456
 ```
 
 `ruff check .` – tiszta. `mypy` – tiszta (`strict`).

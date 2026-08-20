@@ -115,6 +115,26 @@ with Kornyezet(**TISZTA):
                                        if sajat.name == ".venv" else sajat),
           sajat.name == ".venv")
 
+# --- nem irhato mappa: ne probalkozzon minden inditaskor ---------------------
+
+# Nem letezo mappa: ugyanaz az ag, es rendszergazdakent is ellenorizheto.
+with Kornyezet(**TISZTA):
+    eredmeny, uzenet_nincs = csendben(kornyezet.letrehozas, tmp / "nincs-ilyen")
+check("irhatatlan helyen nem indit alfolyamatot", eredmeny, None)
+check("es meg is mondja, miert", "nem lehet irni" in uzenet_nincs, True)
+
+if os.name != "nt" and os.getuid() != 0:  # rendszergazdanak minden irhato
+    zart = tmp / "zart"
+    zart.mkdir()
+    zart.chmod(0o500)
+    try:
+        with Kornyezet(**TISZTA):
+            eredmeny, uzenet_zart = csendben(kornyezet.letrehozas, zart)
+        check("nem irhato mappaban nincs kornyezet", eredmeny, None)
+        check("ott is szol rola", "nem lehet irni" in uzenet_zart, True)
+    finally:
+        zart.chmod(0o700)
+
 # --- valodi kornyezet -------------------------------------------------------
 
 with Kornyezet(**TISZTA):

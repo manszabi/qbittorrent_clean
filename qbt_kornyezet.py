@@ -160,6 +160,13 @@ def letrehozas(gyoker: Path | None = None,
         return utvonal
     if not sys.executable:  # beagyazott Python: nincs mivel letrehozni
         return None
+    if not os.access(hova.parent, os.W_OK):
+        # Nem irhato mappa (pl. Program Files alatt): a venv ugyis elszallna.
+        # Igy legalabb nem indul feleslegesen alfolyamat minden inditaskor.
+        kiir("[FIGYELEM] A program mappajaba nem lehet irni, ezert nincs "
+             "sajat kornyezet:")
+        kiir(f"           {hova.parent}")
+        return None
     # Ha van mar mappa, de nem hasznalhato (frissitett vagy eltavolitott
     # Python), ugyanez a parancs helyre is teszi: ujrairja a beallitasait es
     # az inditoit.

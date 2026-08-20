@@ -7,10 +7,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import email.message
+import http.server
 import io
 import os
 import shutil
+import ssl
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -199,6 +202,65 @@ try:
     check("elerhetetlen kiszolgalo", "nem dobott hibat", "QbtError")
 except q.QbtError:
     check("elerhetetlen kiszolgalo", "QbtError", "QbtError")
+
+# ------------------------------------------ onalairt tanusitvany (https)
+#
+# Otthoni NAS-on a WebUI tanusitvanya szinte mindig onalairt. Ket dolgot kell
+# tudni a programrol: alapbol ELLENORZI a tanusitvanyt (kulonben a "biztonsagos"
+# kapcsolat semmit nem erne), es a kulon keresre (--nem-biztonsagos-tls, illetve
+# a feluleten a jelolonegyzet) valoban atengedi.
+#
+# A tanusitvanyt a teszt keszitteti el az opensslel: igy nincs a repoban
+# privat kulcs, es nincs lejaro fixture sem. Ahol nincs openssl, a szakasz
+# kimarad - a gepet nem minositjuk.
+
+tls_tmp = Path(tempfile.mkdtemp(prefix="qbt-tls-teszt-"))
+tanusitvany, kulcs = tls_tmp / "cert.pem", tls_tmp / "kulcs.pem"
+try:
+    van_openssl = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(kulcs),
+         "-out", str(tanusitvany), "-days", "2", "-nodes", "-subj",
+         "/CN=localhost"],
+        capture_output=True, check=False).returncode == 0
+except OSError:  # pragma: no cover - openssl nelkuli gep
+    van_openssl = False
+
+if not van_openssl:  # pragma: no cover - openssl nelkuli gep
+    print("FIGYELEM: nincs openssl, a https-szakasz kimarad")
+else:
+    class TlsKezelo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # a BaseHTTPRequestHandler adta nev
+            valasz = b"v4.6.5"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(valasz)))
+            self.end_headers()
+            self.wfile.write(valasz)
+
+        def log_message(self, *_a):
+            pass
+
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(str(tanusitvany), str(kulcs))
+    tls_kiszolgalo = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TlsKezelo)
+    tls_kiszolgalo.socket = tls_ctx.wrap_socket(tls_kiszolgalo.socket,
+                                                server_side=True)
+    threading.Thread(target=tls_kiszolgalo.serve_forever, daemon=True).start()
+    tls_url = f"https://127.0.0.1:{tls_kiszolgalo.server_address[1]}"
+
+    szigoru = q.QbtClient(tls_url, "", "", q.Halozat(timeout=5, probak=1))
+    try:
+        szigoru.version()
+        check("onalairt tanusitvany: alapbol elutasitja", "atengedte", "QbtError")
+    except q.QbtError as exc:
+        check_true("onalairt tanusitvany: alapbol elutasitja",
+                   "certificate" in str(exc).lower(), exc)
+
+    engedekeny = q.QbtClient(tls_url, "", "",
+                             q.Halozat(timeout=5, probak=1, insecure=True))
+    check("kulon keresre viszont atengedi", engedekeny.version(), "v4.6.5")
+    tls_kiszolgalo.shutdown()
+
+shutil.rmtree(str(tls_tmp), ignore_errors=True)
 
 # --------------------------------------------- hibatures: ujraprobalkozas
 #
