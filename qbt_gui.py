@@ -49,6 +49,10 @@ BETOLTES_ADAG: Final = 400
 # A háttérszál állapotüzeneteit legfeljebb ilyen sűrűn engedjük az ablakhoz.
 JELZES_SZUNET: Final = 0.1
 
+# A hálózati beállítások gyári értékei (időkorlát, újrapróbálkozás, szálak).
+# Egyetlen, meg nem változtatható példány: a Halozat fagyasztott adatosztály.
+ALAP_HALOZAT: Final = engine.Halozat()
+
 
 def dpi_tudatossag() -> None:
     """Windows 11 alatt a Tk alapbol nem DPI-tudatos: 125-150%-os nagyitasnal
@@ -124,9 +128,22 @@ class Feladat:
     jelszo: str
     konyvtarak: tuple[Path, ...]
     beallitas: engine.Beallitas
+    halozat: engine.Halozat = ALAP_HALOZAT
     pontos: bool = False
     kuka: Path | None = None
     naplo: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Mezok:
+    """A felület ellenőrzött mezői egyben. Csak azért van, hogy az
+    ellenőrzés és a feladat összeállítása két külön, rövid lépés lehessen."""
+
+    konyvtarak: list[Path]
+    min_kor: float
+    utvonalak: tuple[engine.PathMap, ...]
+    halozat: engine.Halozat
+    kuka: Path | None
 
 
 class TakaritoApp:
@@ -185,6 +202,7 @@ class TakaritoApp:
 
         self._mod_valtas()
         self._kuka_valtas()
+        self._tls_valtas()
 
     def _epit_kapcsolat(self, fo: ttk.Frame) -> None:
         """A qBittorrent WebUI adatai."""
@@ -211,6 +229,28 @@ class TakaritoApp:
         ttk.Checkbutton(kap, text="jelszó megjegyzése (sima szövegként mentődik)",
                         variable=self.v_pw_mentes).grid(
             row=2, column=1, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+
+        ttk.Label(kap, text="Időkorlát (mp):").grid(
+            row=3, column=0, sticky="w", pady=(4, 0))
+        self.v_idokorlat = tk.StringVar(value=str(int(ALAP_HALOZAT.timeout)))
+        ttk.Spinbox(kap, from_=1, to=600, increment=5, width=6,
+                    textvariable=self.v_idokorlat).grid(
+            row=3, column=1, sticky="w", padx=4, pady=(4, 0))
+
+        # Ugyanaz, mint a parancssori --nem-biztonsagos-tls. Otthoni NAS-on a
+        # WebUI tanusitvanya szinte mindig onalairt; a kockazatot kiirjuk.
+        self.v_nem_biztonsagos = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            kap, text="önaláírt tanúsítvány elfogadása (https)",
+            variable=self.v_nem_biztonsagos,
+            command=self._tls_valtas).grid(
+            row=3, column=2, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+
+        self.v_tls_gond = tk.StringVar(value="")
+        self.cimke_tls = ttk.Label(kap, textvariable=self.v_tls_gond,
+                                   foreground="#a03000")
+        self.cimke_tls.grid(row=4, column=0, columnspan=5, sticky="w",
+                            pady=(2, 0))
 
         ttk.Button(kap, text="Kapcsolat próba", command=self.kapcsolat_proba).grid(
             row=0, column=4, rowspan=2, sticky="ns", padx=(8, 0))
@@ -375,6 +415,14 @@ class TakaritoApp:
             if isinstance(gyerek, ttk.Button):
                 gyerek.configure(state="normal" if fa_mod else "disabled")
 
+    def _tls_valtas(self) -> None:
+        """A tanúsítvány-ellenőrzés kikapcsolása igazi kockázat: aki a hálózat
+        közepén ül, beleláthat a forgalomba (és a jelszóba). Ezért ki is
+        írjuk, ha be van kapcsolva."""
+        self.v_tls_gond.set(
+            "A tanúsítványt nem ellenőrzöm – csak megbízható (otthoni) "
+            "hálózaton használd." if self.v_nem_biztonsagos.get() else "")
+
     def _kuka_valtas(self) -> None:
         allapot = "normal" if self.v_kuka_be.get() else "disabled"
         self.e_kuka.configure(state=allapot)
@@ -471,6 +519,8 @@ class TakaritoApp:
             "kuka": self.v_kuka.get(),
             "naplo_be": self.v_naplo_be.get(),
             "utvonalak": list(self.lista_ut.get(0, "end")),
+            "idokorlat": self.v_idokorlat.get(),
+            "nem_biztonsagos_tls": self.v_nem_biztonsagos.get(),
         }
         fajl = beallitas_fajl()
         # Előbb egy ideiglenes fájlba írunk, és csak utána cseréljük le a
@@ -520,8 +570,12 @@ class TakaritoApp:
         self.lista_ut.delete(0, "end")
         for sor in _szoveglista(adat.get("utvonalak")):
             self.lista_ut.insert("end", sor)
+        self.v_idokorlat.set(str(adat.get("idokorlat")
+                                 or self.v_idokorlat.get()))
+        self.v_nem_biztonsagos.set(bool(adat.get("nem_biztonsagos_tls")))
         self._mod_valtas()
         self._kuka_valtas()
+        self._tls_valtas()
 
     def kilepes(self) -> None:
         # Munka kozben a kilepes felbehagyna a torlest (a hattérszal a
@@ -573,6 +627,19 @@ class TakaritoApp:
             return False, 0.0
         return True, min_kor
 
+    def _halozat_ellenorzese(self) -> tuple[bool, engine.Halozat]:
+        """A hálózati beállítások: időkorlát és a tanúsítvány-ellenőrzés."""
+        try:
+            idokorlat = float(self.v_idokorlat.get().replace(",", "."))
+        except ValueError:
+            messagebox.showerror(CIM, "Az időkorlát csak szám lehet.")
+            return False, ALAP_HALOZAT
+        if idokorlat <= 0:
+            messagebox.showerror(CIM, "Az időkorlát nullánál nagyobb legyen.")
+            return False, ALAP_HALOZAT
+        return True, engine.Halozat(timeout=idokorlat,
+                                    insecure=self.v_nem_biztonsagos.get())
+
     def _utvonalak_ellenorzese(self) -> tuple[bool, tuple[engine.PathMap, ...]]:
         """Az útvonal-megfeleltetések (TÁVOLI=HELYI) értelmezése."""
         try:
@@ -582,17 +649,12 @@ class TakaritoApp:
             messagebox.showerror(CIM, str(exc))
             return False, ()
 
-    def _beallitasok_osszeszedese(self) -> Feladat | None:
-        """A felületről összeszedett feladat. Hiba esetén None (és szól).
+    def _ellenorzott_mezok(self) -> _Mezok | None:
+        """A felület mezőinek ellenőrzése. Hiba esetén None (és szól).
 
         Az egyes mezők ellenőrzése külön metódusban van: mindegyik ugyanazt a
         (rendben van-e, érték) párt adja vissza, így itt egyetlen minta
-        ismétlődik, nem hétféle hibakezelés."""
-        url = self.v_url.get().strip()
-        if not url:
-            messagebox.showerror(CIM, "Add meg a qBittorrent WebUI címét.")
-            return None
-
+        ismétlődik, nem ötféle hibakezelés."""
         rendben, konyvtarak = self._konyvtarak_ellenorzese()
         if not rendben:
             return None
@@ -602,27 +664,41 @@ class TakaritoApp:
         rendben, utvonalak = self._utvonalak_ellenorzese()
         if not rendben:
             return None
+        rendben, halozat = self._halozat_ellenorzese()
+        if not rendben:
+            return None
         rendben, kuka = self._kuka_ellenorzese(konyvtarak)
         if not rendben:
             return None
+        return _Mezok(konyvtarak, min_kor, utvonalak, halozat, kuka)
 
+    def _beallitasok_osszeszedese(self) -> Feladat | None:
+        """A felületről összeszedett, már ellenőrzött feladat (vagy None)."""
+        url = self.v_url.get().strip()
+        if not url:
+            messagebox.showerror(CIM, "Add meg a qBittorrent WebUI címét.")
+            return None
+        mezok = self._ellenorzott_mezok()
+        if mezok is None:
+            return None
         kivetelek = tuple(x.strip() for x in self.v_kivetel.get().split(",")
                           if x.strip())
         beallitas = engine.Beallitas(
             mode=engine.Mod(self.v_mod.get()),
-            maps=utvonalak,
+            maps=mezok.utvonalak,
             excludes=kivetelek + engine.DEFAULT_EXCLUDES,
-            min_age_days=min_kor,
-            extra_protected=(kuka,) if kuka else (),
+            min_age_days=mezok.min_kor,
+            extra_protected=(mezok.kuka,) if mezok.kuka else (),
         )
         return Feladat(
             url=url,
             user=self.v_user.get().strip(),
             jelszo=self.v_pw.get(),
-            konyvtarak=tuple(konyvtarak),
+            konyvtarak=tuple(mezok.konyvtarak),
             beallitas=beallitas,
+            halozat=mezok.halozat,
             pontos=self.v_pontos.get(),
-            kuka=kuka,
+            kuka=mezok.kuka,
             naplo=Path(self.v_naplo.get()) if self.v_naplo_be.get() else None,
         )
 
@@ -709,13 +785,20 @@ class TakaritoApp:
         if self.dolgozik:
             return
         url = self.v_url.get().strip()
+        if not url:
+            messagebox.showerror(CIM, "Add meg a qBittorrent WebUI címét.")
+            return
+        rendben, halozat = self._halozat_ellenorzese()
+        if not rendben:
+            return
         user = self.v_user.get().strip()
         jelszo = self.v_pw.get()
         self._munka_indul("Kapcsolódás…")
-        self._hatterben(lambda: self._kapcsolat_szal(url, user, jelszo))
+        self._hatterben(lambda: self._kapcsolat_szal(url, user, jelszo, halozat))
 
-    def _kapcsolat_szal(self, url: str, user: str, jelszo: str) -> tuple[Any, ...]:
-        kliens = engine.QbtClient(url, user, jelszo)
+    def _kapcsolat_szal(self, url: str, user: str, jelszo: str,
+                        halozat: engine.Halozat) -> tuple[Any, ...]:
+        kliens = engine.QbtClient(url, user, jelszo, halozat)
         kliens.megszakitva = self.megallj.is_set
         kliens.login()
         return ("kapcsolat", kliens.version(), len(kliens.torrents()))
@@ -737,7 +820,8 @@ class TakaritoApp:
     def _vizsgalat_szal(self, feladat: Feladat) -> tuple[Any, ...]:
         """Külön szálon: WebUI lekérdezés + a könyvtárak átnézése. Tkinterhez
         nem nyúlhat, csak üzen a sorba, illetve az eredményt adja vissza."""
-        kliens = engine.QbtClient(feladat.url, feladat.user, feladat.jelszo)
+        kliens = engine.QbtClient(feladat.url, feladat.user, feladat.jelszo,
+                                  feladat.halozat)
         # A megszakítás a hálózati várakozás közben is hasson.
         kliens.megszakitva = self.megallj.is_set
         kliens.login()

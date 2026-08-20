@@ -67,7 +67,12 @@ Fentről lefelé:
 
 1. **qBittorrent WebUI** – cím, felhasználó, jelszó. A *Kapcsolat próba* gomb
    megmondja, hány torrentet lát. A jelszó csak akkor mentődik el (sima
-   szövegként), ha külön bepipálod.
+   szövegként), ha külön bepipálod. Itt van az **időkorlát** (alapból 30 mp, a
+   parancssori `--idokorlat` párja) és az **önaláírt tanúsítvány elfogadása**
+   is (`--nem-biztonsagos-tls`): ez utóbbi `https`-nél kikapcsolja a
+   tanúsítvány ellenőrzését – otthoni NAS-nál sokszor ez az egyetlen járható
+   út, de a felület ki is írja, hogy ilyenkor a forgalom nem védett a hálózat
+   közepén ülő ellen. Mindkettő a beállításokkal együtt mentődik.
 2. **Vizsgált könyvtárak** – *Tallózás…* vagy *Beírom…* (hálózati útvonalhoz ez
    utóbbi a kényelmesebb: `\\192.168.1.38\downloads`). Sorolj fel minden
    letöltési könyvtárat, az egymásba ágyazottakat is – **védik egymást**.

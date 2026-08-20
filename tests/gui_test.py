@@ -168,6 +168,86 @@ check_true("jo jelszoval kapcsolodik",
 check_true("kiirja a torrentek szamat", "3 torrent" in app.v_allapot.get(),
            app.v_allapot.get())
 
+# --- halozati beallitasok (idokorlat, onalairt tanusitvany) ------------------
+
+check("az idokorlat alapbol a motor gyari erteke", app.v_idokorlat.get(),
+      str(int(qbt_gui.ALAP_HALOZAT.timeout)))
+check("es alapbol ellenorizzuk a tanusitvanyt", app.v_nem_biztonsagos.get(),
+      False)
+
+app.v_idokorlat.set("12")
+app.v_nem_biztonsagos.set(True)
+check("a megadott ertekekbol halozati beallitas lesz",
+      app._halozat_ellenorzese(), (True, qbt_gui.engine.Halozat(
+          timeout=12.0, insecure=True)))
+
+app.v_idokorlat.set("2,5")  # magyar tizedesvesszo
+rendben, halo = app._halozat_ellenorzese()
+check("a tizedesvesszot is elfogadja", (rendben, halo.timeout), (True, 2.5))
+
+parbeszed.hibak = []
+app.v_idokorlat.set("nem szam")
+rendben, halo = app._halozat_ellenorzese()
+check("a nem szamot visszautasitja", rendben, False)
+check("es szol is rola", len(parbeszed.hibak), 1)
+
+parbeszed.hibak = []
+app.v_idokorlat.set("0")
+rendben, halo = app._halozat_ellenorzese()
+check("a nulla idokorlatot sem fogadja el", (rendben, len(parbeszed.hibak)),
+      (False, 1))
+
+parbeszed.hibak = []
+app.v_idokorlat.set("-3")
+check("a negativat sem", app._halozat_ellenorzese()[0], False)
+
+# A rossz idokorlattal a kapcsolat-proba el se indul (nem kezd hattermunkat).
+parbeszed.hibak = []
+app.kapcsolat_proba()
+check("rossz idokorlattal a kapcsolat-proba el sem indul",
+      (app.dolgozik, len(parbeszed.hibak)), (False, 1))
+
+# A figyelmezteto szoveg csak akkor latszik, ha ki van kapcsolva az ellenorzes.
+app.v_nem_biztonsagos.set(True)
+app._tls_valtas()
+check_true("kikapcsolt tanusitvany-ellenorzesnel figyelmeztet",
+           "nem ellenőrzöm" in app.v_tls_gond.get(), app.v_tls_gond.get())
+app.v_nem_biztonsagos.set(False)
+app._tls_valtas()
+check("visszakapcsolva eltunik a figyelmeztetes", app.v_tls_gond.get(), "")
+
+# A felulet tenyleg atadja-e a beallitasokat a kliensnek?
+app.v_idokorlat.set("7")
+app.v_nem_biztonsagos.set(True)
+kapott = []
+igazi_kliens = qbt_gui.engine.QbtClient
+
+
+class FeljegyzoKliens(igazi_kliens):
+    def __init__(self, url, user=None, jelszo=None, halozat=None):
+        kapott.append(halozat)
+        super().__init__(url, user, jelszo, halozat)
+
+
+qbt_gui.engine.QbtClient = FeljegyzoKliens
+app.v_pw.set(PASSWORD)
+app.kapcsolat_proba()
+check_true("a kapcsolat-proba lefutott",
+           varakozas(lambda: not app.dolgozik and kapott))
+check("a kapcsolat-proba a beallitott idokorlatot hasznalja",
+      kapott and kapott[-1], qbt_gui.engine.Halozat(timeout=7.0, insecure=True))
+
+kapott.clear()
+app.vizsgalat()
+check_true("a vizsgalat is lefutott", varakozas(lambda: not app.dolgozik))
+check("a vizsgalat ugyanezeket a beallitasokat kapja",
+      kapott and kapott[-1], qbt_gui.engine.Halozat(timeout=7.0, insecure=True))
+
+qbt_gui.engine.QbtClient = igazi_kliens
+app.v_idokorlat.set(str(int(qbt_gui.ALAP_HALOZAT.timeout)))
+app.v_nem_biztonsagos.set(False)
+app._tls_valtas()
+
 # --- vizsgalat --------------------------------------------------------------
 
 app.vizsgalat()
@@ -325,12 +405,26 @@ app.beallitasok_mentese(csendben=True)
 check_true("kerésre elmenti a jelszot",
            PASSWORD in beallitas.read_text(encoding="utf-8"))
 
+app.v_idokorlat.set("45")
+app.v_nem_biztonsagos.set(True)
+app.beallitasok_mentese(csendben=True)
+
 app.lista_kony.delete(0, "end")
 app.v_url.set("http://elrontva/")
+app.v_idokorlat.set("1")
+app.v_nem_biztonsagos.set(False)
 app.beallitasok_betoltese()
 check("betoltes utan visszaall a cim", app.v_url.get(), URL)
 check("es a konyvtarak is", list(app.lista_kony.get(0, "end")),
       [str(share), str(rss)])
+check("az idokorlat is megmarad", app.v_idokorlat.get(), "45")
+check("es a tanusitvany-beallitas is", app.v_nem_biztonsagos.get(), True)
+check_true("a betoltes a figyelmeztetest is visszateszi",
+           bool(app.v_tls_gond.get()))
+app.v_idokorlat.set(str(int(qbt_gui.ALAP_HALOZAT.timeout)))
+app.v_nem_biztonsagos.set(False)
+app._tls_valtas()
+app.beallitasok_mentese(csendben=True)
 
 # a fajlban jelszo is lehet, ezert csak a tulajdonos olvashassa
 if os.name != "nt":
@@ -345,6 +439,8 @@ app.beallitasok_betoltese()
 check("elrontott beallitas-fajl: a konyvtarlista ures marad",
       list(app.lista_kony.get(0, "end")), [])
 check("es az uzemmod ervenyes ertek marad", app.v_mod.get(), "felso")
+check("elrontott fajl: az idokorlat is ertelmes marad",
+      float(app.v_idokorlat.get()) > 0, True)
 beallitas.write_text("ez nem is JSON", encoding="utf-8")
 app.beallitasok_betoltese()
 check("olvashatatlan beallitas-fajlt is elvisel", app.v_mod.get(), "felso")
